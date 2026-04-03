@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import toast, { Toaster } from 'react-hot-toast';
 import { 
@@ -107,6 +107,9 @@ export default function App() {
   const [voiceModalTab, setVoiceModalTab] = useState<'available' | 'cloned'>('available');
   const [segments, setSegments] = useState<{id: string, text: string, voice: string, characterName?: string}[]>([]);
   const [activeSegmentId, setActiveSegmentId] = useState<string | null>(null);
+  const [playingSegmentId, setPlayingSegmentId] = useState<string | null>(null);
+  const currentAudioRef = useRef<HTMLAudioElement | null>(null);
+  const shouldStopPlayback = useRef(false);
   
   // User Registration State
   const [regUsername, setRegUsername] = useState('');
@@ -668,61 +671,116 @@ export default function App() {
     }
   };
 
-  const pollStatus = async (id: string, key: string) => {
-    const maxRetries = 60; // 60 retries * 2 seconds = 120 seconds
-    let retries = 0;
+  const pollStatus = (id: string, key: string): Promise<{audioUrl: string, srtUrl?: string}> => {
+    return new Promise((resolve, reject) => {
+      const maxRetries = 120; // 120 retries * 2 seconds = 240 seconds
+      let retries = 0;
 
-    const check = async () => {
-      try {
-        const response = await fetch('/api/proxy/tts/status', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${key}`,
-          },
-          body: JSON.stringify({ ids: [id] }),
-        });
+      const interval = setInterval(async () => {
+        retries++;
+        try {
+          const response = await fetch('/api/proxy/tts/status', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${key}`,
+            },
+            body: JSON.stringify({ ids: [id] }),
+          });
 
-        const result = await response.json();
-        
-        if (result.data && Array.isArray(result.data) && result.data.length > 0) {
-          const task = result.data.find((t: any) => t.id === id);
-          if (task) {
-            const { status, resultUrl, srtUrl: taskSrtUrl } = task;
-            
+          const result = await response.json();
+          
+          if (result.data && Array.isArray(result.data) && result.data.length > 0) {
+            const task = result.data.find((t: any) => t.id === id);
+            if (task) {
+              const { status, resultUrl, srtUrl: taskSrtUrl } = task;
+              
               if (status === 'completed' && resultUrl) {
-                setAudioUrl(resultUrl);
-                if (taskSrtUrl) setSrtUrl(taskSrtUrl);
-                setIsGenerating(false);
-                addToHistory({ text: text, voice: voices.find(v => v.id === selectedVoice)?.name || selectedVoice, url: resultUrl });
-                // Refresh user info to update credits
-                fetchApiInfo(key);
-                return true;
+                clearInterval(interval);
+                resolve({ audioUrl: resultUrl, srtUrl: taskSrtUrl });
               } else if (status === 'failed') {
-              setError('Lỗi tạo giọng nói trên máy chủ.');
-              setIsGenerating(false);
-              return true;
+                clearInterval(interval);
+                reject(new Error('Lỗi tạo giọng nói trên máy chủ.'));
+              }
             }
           }
+          
+          if (retries >= maxRetries) {
+            clearInterval(interval);
+            reject(new Error('Quá thời gian chờ tạo giọng nói.'));
+          }
+        } catch (err) {
+          console.error('Polling error:', err);
+          // Don't stop on network error, just retry
         }
-        return false;
-      } catch (err) {
-        console.error('Polling error:', err);
-        return false;
-      }
-    };
+      }, 2000);
+    });
+  };
 
-    const interval = setInterval(async () => {
-      retries++;
-      const done = await check();
-      if (done || retries >= maxRetries) {
-        clearInterval(interval);
-        if (retries >= maxRetries && !done) {
-          setError('Quá thời gian chờ. Vui lòng kiểm tra lịch sử sau.');
-          setIsGenerating(false);
-        }
+  // Helper to merge multiple AudioBuffers
+  const mergeAudioBuffers = (buffers: AudioBuffer[], audioContext: AudioContext) => {
+    const totalLength = buffers.reduce((acc, buf) => acc + buf.length, 0);
+    const mergedBuffer = audioContext.createBuffer(
+      buffers[0].numberOfChannels,
+      totalLength,
+      buffers[0].sampleRate
+    );
+
+    let offset = 0;
+    buffers.forEach(buf => {
+      for (let channel = 0; channel < buf.numberOfChannels; channel++) {
+        mergedBuffer.getChannelData(channel).set(buf.getChannelData(channel), offset);
       }
-    }, 2000);
+      offset += buf.length;
+    });
+
+    return mergedBuffer;
+  };
+
+  // Function to play all segments sequentially
+  const playAllSegments = async (startIndex = 0) => {
+    // Stop any existing playback
+    shouldStopPlayback.current = true;
+    if (currentAudioRef.current) {
+      currentAudioRef.current.pause();
+      currentAudioRef.current = null;
+    }
+    
+    // Small delay to ensure previous loop stops
+    await new Promise(resolve => setTimeout(resolve, 100));
+    shouldStopPlayback.current = false;
+
+    const segmentsToPlay = segments.slice(startIndex).filter(s => s.audioUrl);
+    if (segmentsToPlay.length === 0) {
+      toast.error("Vui lòng chuyển đổi văn bản trước khi nghe.");
+      return;
+    }
+
+    for (const seg of segmentsToPlay) {
+      if (shouldStopPlayback.current) break;
+      
+      setPlayingSegmentId(seg.id);
+      await new Promise((resolve) => {
+        const audio = new Audio(seg.audioUrl);
+        currentAudioRef.current = audio;
+        audio.onended = () => {
+          currentAudioRef.current = null;
+          resolve(null);
+        };
+        audio.onerror = () => {
+          currentAudioRef.current = null;
+          resolve(null);
+        };
+        audio.play().catch(() => {
+          currentAudioRef.current = null;
+          resolve(null);
+        });
+      });
+    }
+    
+    if (!shouldStopPlayback.current) {
+      setPlayingSegmentId(null);
+    }
   };
 
   const handleGenerate = async () => {
@@ -769,29 +827,109 @@ export default function App() {
     setIsGenerating(true);
     setError(null);
     setAudioUrl(null);
+    setSrtUrl(null);
     
     try {
-        const validSegments = segments.filter(s => s.text && s.text.trim());
+      const validSegments = segments.filter(s => s.text && s.text.trim());
+      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+      
+      if (validSegments.length > 0) {
+        // Process in batches of 5 for concurrency
+        const batchSize = 5;
+        const updatedSegments = [...segments];
         
-        // Prepare parts based on segments or full text
-        const parts = validSegments.length > 0 
-          ? validSegments.map((s, idx) => ({
-              startTime: idx * 5, // Mock timing if not available
-              endTime: (idx + 1) * 5,
-              text: s.text,
-              voiceId: s.voice // Use segment-specific voice
-            }))
-          : [{
-              startTime: 0,
-              endTime: 10,
-              text: textToConvert,
-              voiceId: selectedVoice
-            }];
+        for (let i = 0; i < validSegments.length; i += batchSize) {
+          const batch = validSegments.slice(i, i + batchSize);
+          toast.loading(`Đang xử lý nhóm ${Math.floor(i/batchSize) + 1}...`, { id: 'gen-status' });
+          
+          // Process batch in parallel
+          const batchPromises = batch.map(async (seg) => {
+            const payload = {
+              mode: "paragraph",
+              parts: [{
+                startTime: 0,
+                endTime: 10,
+                text: seg.text,
+                voiceId: seg.voice || selectedVoice
+              }],
+              voiceId: seg.voice || selectedVoice,
+              previewText: seg.text.slice(0, 50),
+              metadata: {
+                speed: speed,
+                volume: volume,
+                pitch: pitch,
+                enable_duration: enableDuration,
+                comma_dur: commaDur,
+                dot_dur: dotDur,
+                exclam_dur: exclamDur,
+                question_dur: questionDur,
+                export_srt: exportSrt
+              },
+              modelId: selectedModel
+            };
 
+            const response = await fetch('/api/proxy/tts/submit', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${apiKey}`,
+              },
+              body: JSON.stringify(payload),
+            });
+
+            const data = await response.json().catch(() => ({ message: 'Không thể đọc phản hồi từ máy chủ.' }));
+            
+            if (response.ok && data.data && (data.data.taskId || data.data.id)) {
+              const result = await pollStatus(data.data.taskId || data.data.id, apiKey);
+              
+              // Update segment in our local copy
+              const segIdx = updatedSegments.findIndex(s => s.id === seg.id);
+              if (segIdx !== -1) {
+                updatedSegments[segIdx] = { ...updatedSegments[segIdx], audioUrl: result.audioUrl };
+                setSegments([...updatedSegments]);
+              }
+              return result.audioUrl;
+            } else {
+              const errorMsg = data.msg || data.message || data.error || data.error_message || data.error_msg || data.error_description || (typeof data === 'object' ? JSON.stringify(data) : 'Có lỗi xảy ra khi gọi API.');
+              throw new Error(errorMsg);
+            }
+          });
+
+          await Promise.all(batchPromises);
+        }
+
+        // Merge all audio results
+        toast.loading("Đang gộp toàn bộ âm thanh...", { id: 'gen-status' });
+        const audioBuffers: AudioBuffer[] = [];
+        const finalSegments = updatedSegments.filter(s => s.audioUrl);
+        
+        for (const seg of finalSegments) {
+          if (seg.audioUrl) {
+            const audioRes = await fetch(seg.audioUrl);
+            const arrayBuffer = await audioRes.arrayBuffer();
+            const buffer = await audioContext.decodeAudioData(arrayBuffer);
+            audioBuffers.push(buffer);
+          }
+        }
+
+        if (audioBuffers.length > 0) {
+          const mergedBuffer = mergeAudioBuffers(audioBuffers, audioContext);
+          const wavBlob = bufferToWav(mergedBuffer);
+          const finalUrl = URL.createObjectURL(wavBlob);
+          setAudioUrl(finalUrl);
+        }
+      } else {
+        // Single text generation
+        toast.loading("Đang xử lý văn bản...", { id: 'gen-status' });
         const payload = {
-          mode: validSegments.length > 0 ? "conversation" : "paragraph", // Use conversation mode if segments exist
-          parts: parts,
-          voiceId: selectedVoice, // Fallback voice
+          mode: "paragraph",
+          parts: [{
+            startTime: 0,
+            endTime: 10,
+            text: textToConvert,
+            voiceId: selectedVoice
+          }],
+          voiceId: selectedVoice,
           previewText: textToConvert.slice(0, 50),
           metadata: {
             speed: speed,
@@ -806,8 +944,7 @@ export default function App() {
           },
           modelId: selectedModel
         };
-        console.log('Submitting TTS request via proxy:', payload);
-        
+
         const response = await fetch('/api/proxy/tts/submit', {
           method: 'POST',
           headers: {
@@ -817,23 +954,39 @@ export default function App() {
           body: JSON.stringify(payload),
         });
 
-      const data = await response.json().catch(() => ({ message: 'Không thể đọc phản hồi từ máy chủ.' }));
-      
-      if (response.ok && data.data && (data.data.taskId || data.data.id)) {
-        // Start polling for the result
-        pollStatus(data.data.taskId || data.data.id, apiKey);
-      } else {
-        // Try all common error fields from Maziao API
-        const errorMsg = data.msg || data.message || data.error || data.error_message || data.error_msg || data.error_description || (typeof data === 'object' ? JSON.stringify(data) : 'Có lỗi xảy ra khi gọi API.');
-        const details = data.details ? ` (${data.details})` : '';
-        const statusText = !response.ok ? ` [Status: ${response.status}]` : '';
-        const fullError = `${errorMsg}${details}${statusText}`;
-        console.error('API Error Response:', data);
-        throw new Error(fullError);
+        const data = await response.json().catch(() => ({ message: 'Không thể đọc phản hồi từ máy chủ.' }));
+        
+        if (response.ok && data.data && (data.data.taskId || data.data.id)) {
+          const result = await pollStatus(data.data.taskId || data.data.id, apiKey);
+          
+          const audioRes = await fetch(result.audioUrl);
+          const arrayBuffer = await audioRes.arrayBuffer();
+          const buffer = await audioContext.decodeAudioData(arrayBuffer);
+          
+          const wavBlob = bufferToWav(buffer);
+          const finalUrl = URL.createObjectURL(wavBlob);
+          
+          setAudioUrl(finalUrl);
+          if (result.srtUrl) setSrtUrl(result.srtUrl);
+          
+          addToHistory({ 
+            text: textToConvert.slice(0, 100) + '...', 
+            voice: voices.find(v => v.id === selectedVoice)?.name || selectedVoice, 
+            url: finalUrl 
+          });
+          
+          fetchApiInfo(apiKey);
+          toast.success("Hoàn thành!", { id: 'gen-status' });
+        } else {
+          const errorMsg = data.msg || data.message || data.error || data.error_message || data.error_msg || data.error_description || (typeof data === 'object' ? JSON.stringify(data) : 'Có lỗi xảy ra khi gọi API.');
+          throw new Error(errorMsg);
+        }
       }
     } catch (err: any) {
-      console.error('TTS Submit Error:', err);
-      setError(err.message || 'Không thể kết nối với API Maziao.');
+      console.error('TTS Error:', err);
+      setError(err.message || 'Có lỗi xảy ra.');
+      toast.error(err.message || 'Có lỗi xảy ra.', { id: 'gen-status' });
+    } finally {
       setIsGenerating(false);
     }
   };
@@ -1307,8 +1460,26 @@ export default function App() {
           <div className="flex-1 flex flex-col p-6 relative">
             {segments.length > 0 ? (
               <div className="space-y-4 max-h-[500px] overflow-y-auto p-2">
+                <div className="flex justify-between items-center mb-2">
+                  <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Danh sách đoạn hội thoại</h3>
+                  <button 
+                    onClick={() => {
+                      if (playingSegmentId) {
+                        shouldStopPlayback.current = true;
+                        if (currentAudioRef.current) currentAudioRef.current.pause();
+                        setPlayingSegmentId(null);
+                      } else {
+                        playAllSegments(0);
+                      }
+                    }}
+                    className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-[10px] font-bold transition-all border ${playingSegmentId ? 'bg-red-600/20 border-red-500/30 text-red-400 hover:bg-red-600/30' : 'bg-blue-600/20 border-blue-500/30 text-blue-400 hover:bg-blue-600/30'}`}
+                  >
+                    {playingSegmentId ? <X size={12} /> : <Play size={12} fill="currentColor" />}
+                    <span>{playingSegmentId ? 'Dừng phát' : 'Nghe toàn bộ'}</span>
+                  </button>
+                </div>
                 {segments.map((seg, idx) => (
-                  <div key={seg.id} className="bg-[#0f111a] p-4 rounded-xl border border-slate-700/50 space-y-3 group relative">
+                  <div key={seg.id} className={`bg-[#0f111a] p-4 rounded-xl border transition-all space-y-3 group relative ${playingSegmentId === seg.id ? 'border-blue-500 shadow-[0_0_15px_rgba(59,130,246,0.2)]' : 'border-slate-700/50'}`}>
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2">
                         <div className="text-[10px] font-bold text-blue-400 bg-blue-400/10 px-2 py-0.5 rounded uppercase tracking-wider">Phần {idx + 1}</div>
@@ -1327,12 +1498,31 @@ export default function App() {
                           <ChevronDown size={10} />
                         </button>
                       </div>
-                      <button 
-                        onClick={() => setSegments(segments.filter(s => s.id !== seg.id))}
-                        className="text-slate-500 hover:text-red-500 transition-colors"
-                      >
-                        <Trash2 size={14} />
-                      </button>
+                      <div className="flex items-center gap-2">
+                        {seg.audioUrl && (
+                          <button 
+                            onClick={() => {
+                              if (playingSegmentId === seg.id) {
+                                shouldStopPlayback.current = true;
+                                if (currentAudioRef.current) currentAudioRef.current.pause();
+                                setPlayingSegmentId(null);
+                              } else {
+                                playAllSegments(idx);
+                              }
+                            }}
+                            className={`p-1.5 rounded-lg transition-all ${playingSegmentId === seg.id ? 'bg-blue-600 text-white' : 'bg-slate-800 hover:bg-blue-600 text-slate-400 hover:text-white'}`}
+                            title={playingSegmentId === seg.id ? "Dừng" : "Nghe từ đoạn này"}
+                          >
+                            {playingSegmentId === seg.id ? <X size={12} /> : <Play size={12} fill="currentColor" />}
+                          </button>
+                        )}
+                        <button 
+                          onClick={() => setSegments(segments.filter(s => s.id !== seg.id))}
+                          className="text-slate-500 hover:text-red-500 transition-colors"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
                     </div>
                     <textarea 
                       value={seg.text}
