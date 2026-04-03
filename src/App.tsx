@@ -209,7 +209,10 @@ export default function App() {
         headers: { 'Authorization': `Bearer ${key}` }
       });
       
-      const userDataRes = await userRes.json().catch(() => ({ message: 'Không thể đọc dữ liệu người dùng' }));
+      const userDataRes = await userRes.json().catch(async () => {
+        const text = await userRes.clone().text().catch(() => '');
+        return { message: `Không thể đọc dữ liệu người dùng (Status: ${userRes.status})`, details: text.substring(0, 100) };
+      });
       
       if (userRes.ok) {
         if (userDataRes.data) {
@@ -223,7 +226,12 @@ export default function App() {
         }
       } else {
         console.error('User info fetch failed:', userRes.status, userDataRes);
-        setError(`Lỗi kết nối tài khoản: ${userDataRes.message || userRes.statusText}`);
+        const errorMsg = userDataRes.message || userRes.statusText || 'Lỗi không xác định';
+        if (userRes.status === 404) {
+          setError(`Lỗi kết nối: Máy chủ proxy không hoạt động (404). Vui lòng kiểm tra lại cấu hình triển khai.`);
+        } else {
+          setError(`Lỗi kết nối tài khoản: ${errorMsg}`);
+        }
       }
     } catch (err) {
       console.error('Error fetching API info:', err);
