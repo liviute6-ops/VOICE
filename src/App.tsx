@@ -127,11 +127,27 @@ export default function App() {
   const [selectedGender, setSelectedGender] = useState('Nam');
 
   const fetchApiInfo = async (key: string) => {
-    if (!key) return;
+    if (!key) {
+      setError('Vui lòng nhập API Key');
+      return;
+    }
     const cleanKey = key.trim();
     setIsFetchingInfo(true);
+    setError(null);
+    console.log('Bắt đầu cập nhật thông tin API...');
+
     try {
+      // Check if we are on a host that supports the proxy
+      const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+      const isDevServer = window.location.hostname.includes('asia-southeast1.run.app');
+      const isStaticHost = window.location.hostname.includes('github.io') || window.location.hostname.includes('vercel.app');
+
+      if (isStaticHost && !isDevServer && !isLocalhost) {
+        console.warn('Cảnh báo: Bạn đang chạy ứng dụng trên một nền tảng tĩnh (GitHub Pages/Vercel Static). Proxy API có thể không hoạt động nếu không được cấu hình đúng.');
+      }
+
       // Fetch System Voices
+      console.log('Đang tải danh sách giọng đọc hệ thống...');
       const voicesRes = await fetch('/api/proxy/voices?limit=100', {
         headers: { 'Authorization': `Bearer ${cleanKey}` }
       });
@@ -139,14 +155,16 @@ export default function App() {
       const voicesData = await voicesRes.json().catch(() => ({ message: 'Không thể đọc dữ liệu từ API' }));
       
       if (voicesRes.status === 401) {
-        setError('API Key (PAT token) không hợp lệ hoặc đã hết hạn. Vui lòng kiểm tra lại trong phần cài đặt.');
-        setIsFetchingInfo(false);
-        return;
+        throw new Error('API Key (PAT token) không hợp lệ hoặc đã hết hạn. Vui lòng kiểm tra lại trong phần cài đặt.');
+      }
+
+      if (!voicesRes.ok) {
+        throw new Error(`Lỗi tải danh sách giọng đọc (${voicesRes.status}): ${voicesData.message || voicesRes.statusText}`);
       }
 
       let systemVoices: any[] = [];
-      if (voicesRes.ok) {
-        if (voicesData.data && voicesData.data.items) {
+      if (voicesData.data) {
+        if (voicesData.data.items) {
           systemVoices = voicesData.data.items;
         } else if (Array.isArray(voicesData.data)) {
           systemVoices = voicesData.data;
@@ -154,17 +172,20 @@ export default function App() {
       }
 
       // Fetch My Voices (Cloned)
+      console.log('Đang tải danh sách giọng đọc cá nhân...');
       const myVoicesRes = await fetch('/api/proxy/voices/my-voices?limit=100', {
         headers: { 'Authorization': `Bearer ${cleanKey}` }
       });
-      const myVoicesData = await myVoicesRes.json().catch(() => ({ message: 'Không thể đọc dữ liệu từ API' }));
       
       let myVoices: any[] = [];
       if (myVoicesRes.ok) {
-        if (myVoicesData.data && myVoicesData.data.items) {
-          myVoices = myVoicesData.data.items.map((v: any) => ({ ...v, type: 'clone' }));
-        } else if (Array.isArray(myVoicesData.data)) {
-          myVoices = myVoicesData.data.map((v: any) => ({ ...v, type: 'clone' }));
+        const myVoicesData = await myVoicesRes.json().catch(() => ({}));
+        if (myVoicesData.data) {
+          if (myVoicesData.data.items) {
+            myVoices = myVoicesData.data.items.map((v: any) => ({ ...v, type: 'clone' }));
+          } else if (Array.isArray(myVoicesData.data)) {
+            myVoices = myVoicesData.data.map((v: any) => ({ ...v, type: 'clone' }));
+          }
         }
       }
 
@@ -190,23 +211,30 @@ export default function App() {
         if (DEFAULT_VOICES.some(v => v.id === selectedVoice)) {
           setSelectedVoice(allVoices[0].id);
         }
+        console.log(`Đã tải tổng cộng ${allVoices.length} giọng đọc.`);
       }
 
       // Fetch Models
+      console.log('Đang tải danh sách mô hình TTS...');
       const modelsRes = await fetch('/api/proxy/models', {
-        headers: { 'Authorization': `Bearer ${key}` }
+        headers: { 'Authorization': `Bearer ${cleanKey}` }
       });
-      const modelsData = await modelsRes.json().catch(() => ({ message: 'Không thể đọc dữ liệu từ API' }));
-      if (modelsRes.ok && modelsData.data) {
-        setApiModels(modelsData.data);
-        if (modelsData.data.length > 0 && !modelsData.data.some((m: any) => m.id === selectedModel)) {
-          setSelectedModel(modelsData.data[0].id);
+      
+      if (modelsRes.ok) {
+        const modelsData = await modelsRes.json().catch(() => ({}));
+        if (modelsData.data) {
+          setApiModels(modelsData.data);
+          if (modelsData.data.length > 0 && !modelsData.data.some((m: any) => m.id === selectedModel)) {
+            setSelectedModel(modelsData.data[0].id);
+          }
+          console.log(`Đã tải ${modelsData.data.length} mô hình TTS.`);
         }
       }
 
       // Fetch User Info (Credits)
+      console.log('Đang tải thông tin tài khoản...');
       const userRes = await fetch('/api/proxy/me', {
-        headers: { 'Authorization': `Bearer ${key}` }
+        headers: { 'Authorization': `Bearer ${cleanKey}` }
       });
       
       const userDataRes = await userRes.json().catch(async () => {
@@ -220,21 +248,19 @@ export default function App() {
           setCredits(userDataRes.data.credits || 0);
           localStorage.setItem('maziao_user_data', JSON.stringify(userDataRes.data));
           localStorage.setItem('maziao_credits', (userDataRes.data.credits || 0).toString());
-        } else if (userDataRes.message) {
-          console.error('Proxy error message (me):', userDataRes.message, userDataRes.details);
-          setError(`Lỗi tài khoản: ${userDataRes.message}`);
+          console.log('Đã cập nhật thông tin tài khoản thành công.');
         }
       } else {
-        console.error('User info fetch failed:', userRes.status, userDataRes);
         const errorMsg = userDataRes.message || userRes.statusText || 'Lỗi không xác định';
         if (userRes.status === 404) {
-          setError(`Lỗi kết nối: Máy chủ proxy không hoạt động (404). Vui lòng kiểm tra lại cấu hình triển khai.`);
+          throw new Error(`Máy chủ proxy không hoạt động (404). Vui lòng kiểm tra lại cấu hình triển khai.`);
         } else {
-          setError(`Lỗi kết nối tài khoản: ${errorMsg}`);
+          throw new Error(`Lỗi kết nối tài khoản: ${errorMsg}`);
         }
       }
-    } catch (err) {
-      console.error('Error fetching API info:', err);
+    } catch (err: any) {
+      console.error('Lỗi khi cập nhật thông tin API:', err);
+      setError(err.message || 'Lỗi không xác định khi kết nối API');
     } finally {
       setIsFetchingInfo(false);
     }
@@ -385,7 +411,6 @@ export default function App() {
     
     setApiKey(finalKey);
     localStorage.setItem('maziao_api_key', finalKey);
-    if (finalKey) fetchApiInfo(finalKey);
   };
 
   const saveApiBaseUrl = (url: string) => {
@@ -2259,7 +2284,10 @@ export default function App() {
                       <button 
                         disabled={isFetchingInfo}
                         onClick={() => {
-                          if (!apiKey) return alert('Vui lòng nhập API Key');
+                          if (!apiKey) {
+                            setError('Vui lòng nhập API Key');
+                            return;
+                          }
                           fetchApiInfo(apiKey);
                         }}
                         className="px-6 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl font-bold transition-colors flex items-center gap-2"
