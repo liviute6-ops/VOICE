@@ -1,8 +1,11 @@
 import express from "express";
-import { createServer as createViteServer } from "vite";
 import path from "path";
 import { fileURLToPath } from "url";
 import multer from "multer";
+import nodeFetch from "node-fetch";
+
+// Use native fetch if available, otherwise use node-fetch
+const fetch = (globalThis.fetch || nodeFetch) as any;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -21,7 +24,6 @@ async function startServer() {
     try {
       const authHeader = req.headers.authorization;
       console.log(`Proxying GET to ${targetUrl}`);
-      if (authHeader) console.log(`Auth Header: ${authHeader.substring(0, 15)}... (Len: ${authHeader.length})`);
       
       const response = await fetch(targetUrl, {
         headers: { 
@@ -41,12 +43,17 @@ async function startServer() {
         res.status(response.status).json({ 
           message: `API returned non-JSON response (${response.status})`, 
           details: text.substring(0, 100),
+          status: response.status,
           url: targetUrl
         });
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error(`Proxy error (voices) calling ${targetUrl}:`, error);
-      res.status(500).json({ message: "Internal server error", error: String(error) });
+      res.status(500).json({ 
+        message: "Internal server error in proxy", 
+        error: error.message || String(error),
+        url: targetUrl
+      });
     }
   });
 
@@ -383,12 +390,18 @@ async function startServer() {
 
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
-    app.use(vite.middlewares);
-  } else {
+    try {
+      const { createServer: createViteServer } = await import("vite");
+      const vite = await createViteServer({
+        server: { middlewareMode: true },
+        appType: "spa",
+      });
+      app.use(vite.middlewares);
+    } catch (e) {
+      console.error("Failed to initialize Vite middleware:", e);
+    }
+  } else if (!process.env.VERCEL) {
+    // Only serve static files if NOT on Vercel (Vercel handles static files via vercel.json)
     const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
     app.get("*", (req, res) => {
@@ -396,9 +409,12 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
-  });
+  // Only listen if NOT in a serverless environment
+  if (!process.env.VERCEL && process.env.NODE_ENV !== "test") {
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`Server running on http://localhost:${PORT}`);
+    });
+  }
 
   return app;
 }

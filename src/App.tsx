@@ -152,14 +152,21 @@ export default function App() {
         headers: { 'Authorization': `Bearer ${cleanKey}` }
       });
       
-      const voicesData = await voicesRes.json().catch(() => ({ message: 'Không thể đọc dữ liệu từ API' }));
+      let voicesData: any = {};
+      try {
+        voicesData = await voicesRes.json();
+      } catch (e) {
+        const text = await voicesRes.clone().text().catch(() => '');
+        console.error('Lỗi khi parse JSON từ /api/proxy/voices:', text.substring(0, 200));
+        voicesData = { message: `Không thể đọc dữ liệu từ API (Status: ${voicesRes.status})`, details: text.substring(0, 100) };
+      }
       
       if (voicesRes.status === 401) {
         throw new Error('API Key (PAT token) không hợp lệ hoặc đã hết hạn. Vui lòng kiểm tra lại trong phần cài đặt.');
       }
 
       if (!voicesRes.ok) {
-        throw new Error(`Lỗi tải danh sách giọng đọc (${voicesRes.status}): ${voicesData.message || voicesRes.statusText}`);
+        throw new Error(`Lỗi tải danh sách giọng đọc (${voicesRes.status}): ${voicesData.message || voicesRes.statusText}${voicesData.details ? ` - ${voicesData.details}` : ''}`);
       }
 
       let systemVoices: any[] = [];
