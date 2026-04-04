@@ -71,7 +71,8 @@ const MODELS = [
 ];
 
 const CLONE_MODELS = [
-  { id: 'lingual-speech-v1', name: 'Lingual Speech V1' },
+  { id: 'lingual_speech_v1', name: 'Lingual Speech V1' },
+  { id: 'jeck_speech', name: 'Jeck Speech' },
 ];
 
 export default function App() {
@@ -118,14 +119,14 @@ export default function App() {
   const [isRegistering, setIsRegistering] = useState(false);
 
   // Voice Cloning State
-  const [clonedVoices, setClonedVoices] = useState<{id: string, name: string, status: string, gender?: string, language?: string}[]>([]);
+  const [clonedVoices, setClonedVoices] = useState<{id: string, name: string, status: string, gender?: string, language?: string, previewUrl?: string}[]>([]);
   const [isCloning, setIsCloning] = useState(false);
   const [cloneName, setCloneName] = useState('');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [editingVoiceId, setEditingVoiceId] = useState<string | null>(null);
   const [editingVoiceName, setEditingVoiceName] = useState('');
   const [selectedCloneModel, setSelectedCloneModel] = useState(CLONE_MODELS[0].id);
-  const [selectedGender, setSelectedGender] = useState('Nam');
+  const [selectedGender, setSelectedGender] = useState('male');
 
   const fetchApiInfo = async (key: string) => {
     if (!key) {
@@ -209,7 +210,10 @@ export default function App() {
           const mappedClones = clones.map((v: any) => ({
             id: v.id,
             name: v.name,
-            status: v.status || 'Hoàn thành'
+            status: v.status || 'Hoàn thành',
+            gender: v.gender,
+            language: v.language,
+            previewUrl: v.previewUrl || v.refFile
           }));
           setClonedVoices(mappedClones);
           localStorage.setItem('maziao_cloned_voices', JSON.stringify(mappedClones));
@@ -542,6 +546,43 @@ export default function App() {
     }
 
     return new Blob([buffer_arr], {type: "audio/wav"});
+  };
+
+  const trimAudioFile = async (file: File): Promise<File> => {
+    try {
+      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const arrayBuffer = await file.arrayBuffer();
+      const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+      
+      const maxDuration = 8; // seconds
+      if (audioBuffer.duration <= maxDuration) {
+        return file; // No need to trim
+      }
+      
+      toast.loading("Đang tự động cắt âm thanh xuống 8 giây...", { id: 'trim-status' });
+      
+      const numChannels = audioBuffer.numberOfChannels;
+      const sampleRate = audioBuffer.sampleRate;
+      const numFrames = Math.floor(maxDuration * sampleRate);
+      
+      const trimmedBuffer = audioContext.createBuffer(numChannels, numFrames, sampleRate);
+      
+      for (let i = 0; i < numChannels; i++) {
+        const channelData = audioBuffer.getChannelData(i);
+        const trimmedChannelData = trimmedBuffer.getChannelData(i);
+        trimmedChannelData.set(channelData.subarray(0, numFrames));
+      }
+      
+      const wavBlob = bufferToWav(trimmedBuffer);
+      const trimmedFile = new File([wavBlob], file.name.replace(/\.[^/.]+$/, "") + "_trimmed.wav", { type: 'audio/wav' });
+      
+      toast.success("Đã cắt âm thanh xuống 8 giây!", { id: 'trim-status' });
+      return trimmedFile;
+    } catch (error) {
+      console.error("Error trimming audio:", error);
+      toast.error("Không thể cắt âm thanh. Vui lòng thử lại với tệp khác.", { id: 'trim-status' });
+      return file;
+    }
   };
 
   const handleCloneVoice = async () => {
@@ -1308,8 +1349,8 @@ export default function App() {
                     onChange={(e) => setSelectedGender(e.target.value)}
                     className="w-full bg-[#0f111a] border border-slate-700 rounded-xl px-4 py-3 text-sm appearance-none focus:outline-none focus:ring-2 focus:ring-blue-500/50 text-white"
                   >
-                    <option value="Nam">Nam</option>
-                    <option value="Nữ">Nữ</option>
+                    <option value="male">Nam</option>
+                    <option value="female">Nữ</option>
                   </select>
                   <ChevronDown size={16} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" />
                 </div>
@@ -1330,7 +1371,15 @@ export default function App() {
                     type="file" 
                     accept="audio/*"
                     className="hidden"
-                    onChange={(e) => setSelectedFile(e.target.files?.[0] || null)}
+                    onChange={async (e) => {
+                      const file = e.target.files?.[0];
+                      if (file) {
+                        const processedFile = await trimAudioFile(file);
+                        setSelectedFile(processedFile);
+                      } else {
+                        setSelectedFile(null);
+                      }
+                    }}
                   />
                   <div className="flex flex-col items-center gap-3">
                     <Upload size={32} className={selectedFile ? 'text-blue-500' : 'text-slate-500'} />
@@ -1339,12 +1388,41 @@ export default function App() {
                         {selectedFile ? selectedFile.name : 'Nhấp hoặc kéo để tải lên tại đây'}
                       </div>
                       <div className="text-[11px] text-slate-500">
-                        Thời lượng 3 giây - 8 giây, tối đa 1MB<br />
+                        Tự động cắt nếu trên 8 giây, tối đa 1MB<br />
                         Hiện chỉ hỗ trợ: mp3, wav
                       </div>
                     </div>
                   </div>
                 </div>
+                
+                {selectedFile && (
+                  <div className="flex items-center gap-3 bg-blue-500/10 border border-blue-500/20 rounded-xl p-3">
+                    <button 
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        const url = URL.createObjectURL(selectedFile);
+                        const audio = new Audio(url);
+                        audio.play();
+                      }}
+                      className="w-8 h-8 bg-blue-600 text-white rounded-full flex items-center justify-center hover:bg-blue-700 transition-all"
+                    >
+                      <Play size={14} fill="currentColor" />
+                    </button>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-xs font-medium text-blue-300 truncate">{selectedFile.name}</div>
+                      <div className="text-[10px] text-blue-400/60">Sẵn sàng để nhân bản</div>
+                    </div>
+                    <button 
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setSelectedFile(null);
+                      }}
+                      className="p-1.5 text-slate-500 hover:text-red-500 hover:bg-red-500/10 rounded-md transition-all"
+                    >
+                      <X size={14} />
+                    </button>
+                  </div>
+                )}
               </div>
 
               <button 
@@ -1388,13 +1466,48 @@ export default function App() {
                     <div key={voice.id} className="bg-[#0f111a] border border-slate-700/50 rounded-2xl p-5 space-y-4 hover:border-blue-500/30 transition-all group relative">
                       <div className="space-y-3">
                         <div className="flex items-center justify-between">
-                          <div className="font-bold text-lg truncate pr-8">{voice.name}</div>
-                          <button 
-                            onClick={() => handleDeleteVoice(voice.id)}
-                            className="absolute top-5 right-5 p-2 text-slate-500 hover:text-red-500 hover:bg-red-500/10 rounded-lg transition-all opacity-0 group-hover:opacity-100"
-                          >
-                            <Trash2 size={16} />
-                          </button>
+                          {editingVoiceId === voice.id ? (
+                            <div className="flex items-center gap-2 w-full pr-8">
+                              <input 
+                                type="text"
+                                value={editingVoiceName}
+                                onChange={(e) => setEditingVoiceName(e.target.value)}
+                                className="flex-1 bg-[#1a1c2e] border border-slate-700 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
+                                autoFocus
+                              />
+                              <button 
+                                onClick={() => handleUpdateVoice(voice.id)}
+                                className="p-1.5 text-emerald-500 hover:bg-emerald-500/10 rounded-md"
+                              >
+                                <Check size={16} />
+                              </button>
+                              <button 
+                                onClick={() => setEditingVoiceId(null)}
+                                className="p-1.5 text-slate-500 hover:bg-slate-500/10 rounded-md"
+                              >
+                                <X size={16} />
+                              </button>
+                            </div>
+                          ) : (
+                            <div className="font-bold text-lg truncate pr-8">{voice.name}</div>
+                          )}
+                          <div className="flex items-center gap-2">
+                            <button 
+                              onClick={() => {
+                                setEditingVoiceId(voice.id);
+                                setEditingVoiceName(voice.name);
+                              }}
+                              className="p-2 text-slate-500 hover:text-blue-500 hover:bg-blue-500/10 rounded-lg transition-all opacity-0 group-hover:opacity-100"
+                            >
+                              <Edit2 size={16} />
+                            </button>
+                            <button 
+                              onClick={() => handleDeleteVoice(voice.id)}
+                              className="p-2 text-slate-500 hover:text-red-500 hover:bg-red-500/10 rounded-lg transition-all opacity-0 group-hover:opacity-100"
+                            >
+                              <Trash2 size={16} />
+                            </button>
+                          </div>
                         </div>
                         
                         <div className="flex flex-wrap gap-2">
@@ -1402,7 +1515,7 @@ export default function App() {
                             Tiếng Việt
                           </span>
                           <span className="px-2.5 py-0.5 bg-pink-500/10 text-pink-400 text-[10px] font-bold rounded-md border border-pink-500/20">
-                            {voice.gender || 'Nữ'}
+                            {voice.gender === 'male' ? 'Nam' : voice.gender === 'female' ? 'Nữ' : (voice.gender || 'Nữ')}
                           </span>
                           <span className="px-2.5 py-0.5 bg-emerald-500/10 text-emerald-400 text-[10px] font-bold rounded-md border border-emerald-500/20">
                             Nhân bản
@@ -1411,7 +1524,17 @@ export default function App() {
                       </div>
 
                       <div className="flex items-center gap-3 pt-2">
-                        <button className="w-10 h-10 bg-blue-600/10 text-blue-500 rounded-full flex items-center justify-center hover:bg-blue-600 hover:text-white transition-all">
+                        <button 
+                          onClick={() => {
+                            if (voice.previewUrl) {
+                              const audio = new Audio(voice.previewUrl);
+                              audio.play();
+                            } else {
+                              toast.error('Không có âm thanh mẫu để nghe thử.');
+                            }
+                          }}
+                          className="w-10 h-10 bg-blue-600/10 text-blue-500 rounded-full flex items-center justify-center hover:bg-blue-600 hover:text-white transition-all"
+                        >
                           <Play size={18} fill="currentColor" />
                         </button>
                         <button 
@@ -1817,34 +1940,36 @@ export default function App() {
                   </div>
                 </div>
                 
-                <div className="grid grid-cols-2 gap-2">
-                  <button 
-                    onClick={() => {
-                      setVoiceModalTab('available');
-                      setIsVoiceModalOpen(true);
-                    }}
-                    className={`py-2.5 rounded-xl text-[10px] font-black uppercase tracking-wider transition-all border ${
-                      !(voices.find(v => v.id === selectedVoice)?.type === 'clone' || voices.find(v => v.id === selectedVoice)?.tags?.includes('clone'))
-                      ? 'bg-blue-600 border-blue-500 text-white shadow-lg shadow-blue-900/20' 
-                      : 'bg-slate-800/50 border-slate-700/50 text-slate-500 hover:text-slate-300'
-                    }`}
-                  >
-                    Hệ thống
-                  </button>
-                  <button 
-                    onClick={() => {
-                      setVoiceModalTab('cloned');
-                      setIsVoiceModalOpen(true);
-                    }}
-                    className={`py-2.5 rounded-xl text-[10px] font-black uppercase tracking-wider transition-all border ${
-                      (voices.find(v => v.id === selectedVoice)?.type === 'clone' || voices.find(v => v.id === selectedVoice)?.tags?.includes('clone'))
-                      ? 'bg-emerald-600 border-emerald-500 text-white shadow-lg shadow-emerald-900/20' 
-                      : 'bg-slate-800/50 border-slate-700/50 text-slate-500 hover:text-slate-300'
-                    }`}
-                  >
-                    Nhân bản
-                  </button>
-                </div>
+                {selectedModel !== 'lingual_speech_v1' && (
+                  <div className="grid grid-cols-2 gap-2">
+                    <button 
+                      onClick={() => {
+                        setVoiceModalTab('available');
+                        setIsVoiceModalOpen(true);
+                      }}
+                      className={`py-2.5 rounded-xl text-[10px] font-black uppercase tracking-wider transition-all border ${
+                        !(voices.find(v => v.id === selectedVoice)?.type === 'clone' || voices.find(v => v.id === selectedVoice)?.tags?.includes('clone'))
+                        ? 'bg-blue-600 border-blue-500 text-white shadow-lg shadow-blue-900/20' 
+                        : 'bg-slate-800/50 border-slate-700/50 text-slate-500 hover:text-slate-300'
+                      }`}
+                    >
+                      Hệ thống
+                    </button>
+                    <button 
+                      onClick={() => {
+                        setVoiceModalTab('cloned');
+                        setIsVoiceModalOpen(true);
+                      }}
+                      className={`py-2.5 rounded-xl text-[10px] font-black uppercase tracking-wider transition-all border ${
+                        (voices.find(v => v.id === selectedVoice)?.type === 'clone' || voices.find(v => v.id === selectedVoice)?.tags?.includes('clone'))
+                        ? 'bg-emerald-600 border-emerald-500 text-white shadow-lg shadow-emerald-900/20' 
+                        : 'bg-slate-800/50 border-slate-700/50 text-slate-500 hover:text-slate-300'
+                      }`}
+                    >
+                      Nhân bản
+                    </button>
+                  </div>
+                )}
 
                 <button 
                   onClick={() => setIsVoiceModalOpen(true)}
@@ -1871,7 +1996,20 @@ export default function App() {
                 <select 
                   className="w-full appearance-none bg-[#0f111a] border border-slate-700/50 rounded-xl px-4 py-3 pr-10 text-sm font-semibold text-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500 cursor-pointer transition-all"
                   value={selectedModel}
-                  onChange={(e) => setSelectedModel(e.target.value)}
+                  onChange={(e) => {
+                    const modelId = e.target.value;
+                    setSelectedModel(modelId);
+                    if (modelId === 'lingual_speech_v1') {
+                      setVoiceModalTab('cloned');
+                      // If current voice is not a clone, switch to the first available clone
+                      const isClone = (v: any) => v.type === 'clone' || (v.tags && v.tags.includes('clone')) || v.userId !== null;
+                      const currentVoice = voices.find(v => v.id === selectedVoice);
+                      if (currentVoice && !isClone(currentVoice)) {
+                        const firstClone = voices.find(isClone);
+                        if (firstClone) setSelectedVoice(firstClone.id);
+                      }
+                    }
+                  }}
                 >
                   {apiModels.length > 0 ? (
                     apiModels.map(m => (
@@ -2147,36 +2285,49 @@ export default function App() {
                     Chọn giọng nói
                   </h3>
                   <button onClick={() => setIsVoiceModalOpen(false)} className="text-slate-400 hover:text-white transition-colors">
-                    <RefreshCw size={20} className="rotate-45" />
+                    <X size={20} />
                   </button>
                 </div>
                 
-                <div className="flex p-1 bg-[#0f111a] rounded-xl border border-slate-700/50">
-                  <button 
-                    onClick={() => setVoiceModalTab('available')}
-                    className={`flex-1 py-2.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all ${voiceModalTab === 'available' ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-500 hover:text-slate-300'}`}
-                  >
-                    <div className="flex items-center justify-center gap-2">
-                      <Zap size={14} fill={voiceModalTab === 'available' ? "currentColor" : "none"} />
-                      Giọng hệ thống
+                {selectedModel !== 'lingual_speech_v1' ? (
+                  <div className="flex p-1 bg-[#0f111a] rounded-xl border border-slate-700/50">
+                    <button 
+                      onClick={() => setVoiceModalTab('available')}
+                      className={`flex-1 py-2.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all ${voiceModalTab === 'available' ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-500 hover:text-slate-300'}`}
+                    >
+                      <div className="flex items-center justify-center gap-2">
+                        <Zap size={14} fill={voiceModalTab === 'available' ? "currentColor" : "none"} />
+                        Giọng hệ thống
+                      </div>
+                    </button>
+                    <button 
+                      onClick={() => setVoiceModalTab('cloned')}
+                      className={`flex-1 py-2.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all ${voiceModalTab === 'cloned' ? 'bg-emerald-600 text-white shadow-lg' : 'text-slate-500 hover:text-slate-300'}`}
+                    >
+                      <div className="flex items-center justify-center gap-2">
+                        <Mic size={14} fill={voiceModalTab === 'cloned' ? "currentColor" : "none"} />
+                        Giọng nhân bản
+                      </div>
+                    </button>
+                  </div>
+                ) : (
+                  <div className="bg-emerald-600/10 border border-emerald-500/20 p-3 rounded-xl flex items-center gap-3">
+                    <div className="w-8 h-8 bg-emerald-600 rounded-lg flex items-center justify-center text-white">
+                      <Mic size={16} />
                     </div>
-                  </button>
-                  <button 
-                    onClick={() => setVoiceModalTab('cloned')}
-                    className={`flex-1 py-2.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all ${voiceModalTab === 'cloned' ? 'bg-emerald-600 text-white shadow-lg' : 'text-slate-500 hover:text-slate-300'}`}
-                  >
-                    <div className="flex items-center justify-center gap-2">
-                      <Mic size={14} fill={voiceModalTab === 'cloned' ? "currentColor" : "none"} />
-                      Giọng nhân bản
+                    <div>
+                      <div className="text-xs font-bold text-emerald-400 uppercase tracking-wider">Chế độ nhân bản</div>
+                      <div className="text-[10px] text-emerald-500/70">Chỉ hiển thị các giọng nói bạn đã nhân bản</div>
                     </div>
-                  </button>
-                </div>
+                  </div>
+                )}
               </div>
               
               <div className="flex-1 overflow-y-auto p-6 grid grid-cols-1 sm:grid-cols-2 gap-4 custom-scrollbar">
                 {voices
                   .filter(v => {
                     const isClone = v.type === 'clone' || (v.tags && v.tags.includes('clone')) || v.userId !== null;
+                    if (selectedModel === 'lingual_speech_v1') return isClone;
                     return voiceModalTab === 'cloned' ? isClone : !isClone;
                   })
                   .map((voice) => (
