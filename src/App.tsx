@@ -844,8 +844,9 @@ export default function App() {
       return;
     }
 
-    if (textToConvert.length < 100) {
-      setError('Văn bản quá ngắn. API yêu cầu ít nhất 100 ký tự để chuyển đổi. Vui lòng nhập thêm văn bản.');
+    // The API requires at least 100 characters. We'll handle this by padding if needed.
+    if (textToConvert.length < 1) {
+      setError('Vui lòng nhập văn bản cần chuyển đổi.');
       return;
     }
 
@@ -898,7 +899,7 @@ export default function App() {
                 parts: [{
                   startTime: 0,
                   endTime: 10,
-                  text: seg.text,
+                  text: seg.text.length < 100 ? seg.text.padEnd(99, ' ') + '.' : seg.text,
                   voiceId: seg.voice || selectedVoice
                 }],
                 voiceId: seg.voice || selectedVoice,
@@ -989,7 +990,7 @@ export default function App() {
           parts: [{
             startTime: 0,
             endTime: 10,
-            text: textToConvert,
+            text: textToConvert.length < 100 ? textToConvert.padEnd(99, ' ') + '.' : textToConvert,
             voiceId: selectedVoice
           }],
           voiceId: selectedVoice,
