@@ -108,6 +108,7 @@ export default function App() {
   const [segments, setSegments] = useState<{id: string, text: string, voice: string, characterName?: string}[]>([]);
   const [activeSegmentId, setActiveSegmentId] = useState<string | null>(null);
   const [playingSegmentId, setPlayingSegmentId] = useState<string | null>(null);
+  const [isolateVoiceId, setIsolateVoiceId] = useState<string | null>(null); // This will store either characterName or voiceId
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
   const shouldStopPlayback = useRef(false);
   
@@ -437,109 +438,50 @@ export default function App() {
   };
 
   // Function to download audio with specific character only
-  const downloadCharacterAudio = async (characterName: string | null) => {
-    if (!audioUrl) return;
+  const downloadCharacterAudio = async (targetCharName: string | null) => {
+    if (segments.length === 0) return;
     
     try {
       toast.loading("Đang xử lý âm thanh...");
-      
-      // 1. Fetch audio and SRT
-      const audioResponse = await fetch(audioUrl);
-      const audioBlob = await audioResponse.blob();
       const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
-      const arrayBuffer = await audioBlob.arrayBuffer();
-      const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+      const audioBuffers: AudioBuffer[] = [];
       
-      let srtText = "";
-      if (srtUrl) {
-        try {
-          const srtResponse = await fetch(srtUrl);
-          srtText = await srtResponse.text();
-        } catch (e) {
-          console.error("Failed to fetch SRT:", e);
+      const finalSegments = segments.filter(s => s.audioUrl);
+      if (finalSegments.length === 0) {
+        toast.error("Vui lòng chuyển đổi văn bản trước.");
+        return;
+      }
+
+      for (const seg of finalSegments) {
+        const audioRes = await fetch(seg.audioUrl!);
+        const arrayBuffer = await audioRes.arrayBuffer();
+        const buffer = await audioContext.decodeAudioData(arrayBuffer);
+        
+        // If targetCharName is provided, mute segments that don't match
+        if (targetCharName && seg.characterName !== targetCharName) {
+          const silentBuffer = audioContext.createBuffer(
+            buffer.numberOfChannels,
+            buffer.length,
+            buffer.sampleRate
+          );
+          audioBuffers.push(silentBuffer);
+        } else {
+          audioBuffers.push(buffer);
         }
       }
       
-      // 2. Parse SRT to get segments with timestamps
-      const srtSegments: {start: number, end: number, text: string}[] = [];
-      if (srtText) {
-        const blocks = srtText.split(/\n\s*\n/);
-        blocks.forEach(block => {
-          const lines = block.trim().split('\n');
-          if (lines.length >= 3) {
-            const timeLine = lines[1];
-            const textLine = lines.slice(2).join(' ');
-            const match = timeLine.match(/(\d{2}:\d{2}:\d{2},\d{3}) --> (\d{2}:\d{2}:\d{2},\d{3})/);
-            if (match) {
-              const parseTime = (t: string) => {
-                const parts = t.split(':');
-                const h = parseInt(parts[0]);
-                const m = parseInt(parts[1]);
-                const s_ms = parts[2].split(',');
-                const s = parseInt(s_ms[0]);
-                const ms = parseInt(s_ms[1]);
-                return h * 3600 + m * 60 + s + ms / 1000;
-              };
-              srtSegments.push({
-                start: parseTime(match[1]),
-                end: parseTime(match[2]),
-                text: textLine.trim()
-              });
-            }
-          }
-        });
+      if (audioBuffers.length > 0) {
+        const mergedBuffer = mergeAudioBuffers(audioBuffers, audioContext);
+        const wavBlob = bufferToWav(mergedBuffer);
+        const url = URL.createObjectURL(wavBlob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = targetCharName ? `audio_${targetCharName}.wav` : `audio_merged.wav`;
+        a.click();
+        URL.revokeObjectURL(url);
+        toast.dismiss();
+        toast.success("Tải xuống thành công!");
       }
-
-      // 3. Create OfflineAudioContext for rendering
-      const offlineCtx = new OfflineAudioContext(
-        audioBuffer.numberOfChannels,
-        audioBuffer.length,
-        audioBuffer.sampleRate
-      );
-      
-      const source = offlineCtx.createBufferSource();
-      source.buffer = audioBuffer;
-      
-      if (characterName) {
-        const gainNode = offlineCtx.createGain();
-        gainNode.gain.setValueAtTime(0, 0); // Start silent
-        
-        // Match SRT segments to our character
-        srtSegments.forEach(srtSeg => {
-          // Find which of our segments this SRT segment belongs to
-          const matchingSegment = segments.find(s => 
-            s.characterName === characterName && 
-            (s.text.toLowerCase().includes(srtSeg.text.toLowerCase()) || 
-             srtSeg.text.toLowerCase().includes(s.text.toLowerCase()))
-          );
-          
-          if (matchingSegment) {
-            // Unmute during this segment
-            gainNode.gain.setValueAtTime(1, srtSeg.start);
-            gainNode.gain.setValueAtTime(0, srtSeg.end);
-          }
-        });
-        
-        source.connect(gainNode);
-        gainNode.connect(offlineCtx.destination);
-      } else {
-        source.connect(offlineCtx.destination);
-      }
-      
-      source.start(0);
-      const renderedBuffer = await offlineCtx.startRendering();
-      
-      // 4. Convert to WAV and download
-      const wavBlob = bufferToWav(renderedBuffer);
-      const url = URL.createObjectURL(wavBlob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = characterName ? `audio_${characterName}.wav` : `audio_merged.wav`;
-      a.click();
-      URL.revokeObjectURL(url);
-      
-      toast.dismiss();
-      toast.success("Tải xuống thành công!");
     } catch (error) {
       console.error("Error processing audio:", error);
       toast.dismiss();
@@ -685,6 +627,48 @@ export default function App() {
     }
   };
 
+  // Automatically re-merge audio when isolation settings change
+  useEffect(() => {
+    const reMerge = async () => {
+      const allHaveAudio = segments.length > 0 && segments.every(s => s.audioUrl);
+      if (!allHaveAudio) return;
+
+      try {
+        const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+        const audioBuffers: AudioBuffer[] = [];
+        
+        for (const seg of segments) {
+          const audioRes = await fetch(seg.audioUrl!);
+          const arrayBuffer = await audioRes.arrayBuffer();
+          const buffer = await audioContext.decodeAudioData(arrayBuffer);
+          
+          const currentSegKey = getSegmentVoiceKey(seg);
+          if (isolateVoiceId && currentSegKey !== isolateVoiceId) {
+            const silentBuffer = audioContext.createBuffer(
+              buffer.numberOfChannels,
+              buffer.length,
+              buffer.sampleRate
+            );
+            audioBuffers.push(silentBuffer);
+          } else {
+            audioBuffers.push(buffer);
+          }
+        }
+
+        if (audioBuffers.length > 0) {
+          const mergedBuffer = mergeAudioBuffers(audioBuffers, audioContext);
+          const wavBlob = bufferToWav(mergedBuffer);
+          const finalUrl = URL.createObjectURL(wavBlob);
+          setAudioUrl(finalUrl);
+        }
+      } catch (err) {
+        console.error('Auto-merge error:', err);
+      }
+    };
+
+    reMerge();
+  }, [isolateVoiceId]);
+
   const handleUpdateVoice = async (id: string) => {
     if (!apiKey || !editingVoiceName.trim()) return;
 
@@ -777,6 +761,11 @@ export default function App() {
     return mergedBuffer;
   };
 
+  // Helper to get a unique key for a segment's voice/character
+  const getSegmentVoiceKey = (seg: {voice: string, characterName?: string}) => {
+    return seg.characterName || seg.voice || selectedVoice;
+  };
+
   // Function to play all segments sequentially
   const playAllSegments = async (startIndex = 0) => {
     // Stop any existing playback
@@ -796,25 +785,41 @@ export default function App() {
       return;
     }
 
+    const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+
     for (const seg of segmentsToPlay) {
       if (shouldStopPlayback.current) break;
       
       setPlayingSegmentId(seg.id);
+      
+      const currentSegKey = getSegmentVoiceKey(seg);
+      const isIsolated = isolateVoiceId && currentSegKey !== isolateVoiceId;
+
       await new Promise((resolve) => {
-        const audio = new Audio(seg.audioUrl);
-        currentAudioRef.current = audio;
-        audio.onended = () => {
-          currentAudioRef.current = null;
-          resolve(null);
-        };
-        audio.onerror = () => {
-          currentAudioRef.current = null;
-          resolve(null);
-        };
-        audio.play().catch(() => {
-          currentAudioRef.current = null;
-          resolve(null);
-        });
+        if (isIsolated) {
+          // If isolated and not this character, just wait for the duration
+          // We need to fetch the audio to know the duration
+          fetch(seg.audioUrl!).then(res => res.arrayBuffer()).then(ab => audioContext.decodeAudioData(ab)).then(buffer => {
+            setTimeout(() => {
+              resolve(null);
+            }, buffer.duration * 1000);
+          }).catch(() => resolve(null));
+        } else {
+          const audio = new Audio(seg.audioUrl);
+          currentAudioRef.current = audio;
+          audio.onended = () => {
+            currentAudioRef.current = null;
+            resolve(null);
+          };
+          audio.onerror = () => {
+            currentAudioRef.current = null;
+            resolve(null);
+          };
+          audio.play().catch(() => {
+            currentAudioRef.current = null;
+            resolve(null);
+          });
+        }
       });
     }
     
@@ -878,64 +883,69 @@ export default function App() {
         const batchSize = 5;
         const updatedSegments = [...segments];
         
-        for (let i = 0; i < validSegments.length; i += batchSize) {
-          const batch = validSegments.slice(i, i + batchSize);
-          toast.loading(`Đang xử lý nhóm ${Math.floor(i/batchSize) + 1}...`, { id: 'gen-status' });
-          
-          // Process batch in parallel
-          const batchPromises = batch.map(async (seg) => {
-            const payload = {
-              mode: "paragraph",
-              parts: [{
-                startTime: 0,
-                endTime: 10,
-                text: seg.text,
-                voiceId: seg.voice || selectedVoice
-              }],
-              voiceId: seg.voice || selectedVoice,
-              previewText: seg.text.slice(0, 50),
-              metadata: {
-                speed: speed,
-                volume: volume,
-                pitch: pitch,
-                enable_duration: enableDuration,
-                comma_dur: commaDur,
-                dot_dur: dotDur,
-                exclam_dur: exclamDur,
-                question_dur: questionDur,
-                export_srt: exportSrt
-              },
-              modelId: selectedModel
-            };
+        // Only process segments that don't have an audioUrl yet
+        const segmentsToFetch = validSegments.filter(s => !s.audioUrl);
+        
+        if (segmentsToFetch.length > 0) {
+          for (let i = 0; i < segmentsToFetch.length; i += batchSize) {
+            const batch = segmentsToFetch.slice(i, i + batchSize);
+            toast.loading(`Đang xử lý nhóm ${Math.floor(i/batchSize) + 1}/${Math.ceil(segmentsToFetch.length/batchSize)}...`, { id: 'gen-status' });
+            
+            // Process batch in parallel
+            const batchPromises = batch.map(async (seg) => {
+              const payload = {
+                mode: "paragraph",
+                parts: [{
+                  startTime: 0,
+                  endTime: 10,
+                  text: seg.text,
+                  voiceId: seg.voice || selectedVoice
+                }],
+                voiceId: seg.voice || selectedVoice,
+                previewText: seg.text.slice(0, 50),
+                metadata: {
+                  speed: speed,
+                  volume: volume,
+                  pitch: pitch,
+                  enable_duration: enableDuration,
+                  comma_dur: commaDur,
+                  dot_dur: dotDur,
+                  exclam_dur: exclamDur,
+                  question_dur: questionDur,
+                  export_srt: exportSrt
+                },
+                modelId: selectedModel
+              };
 
-            const response = await fetch('/api/proxy/tts/submit', {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${apiKey}`,
-              },
-              body: JSON.stringify(payload),
+              const response = await fetch('/api/proxy/tts/submit', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Authorization': `Bearer ${apiKey}`,
+                },
+                body: JSON.stringify(payload),
+              });
+
+              const data = await response.json().catch(() => ({ message: 'Không thể đọc phản hồi từ máy chủ.' }));
+              
+              if (response.ok && data.data && (data.data.taskId || data.data.id)) {
+                const result = await pollStatus(data.data.taskId || data.data.id, apiKey);
+                
+                // Update segment in our local copy
+                const segIdx = updatedSegments.findIndex(s => s.id === seg.id);
+                if (segIdx !== -1) {
+                  updatedSegments[segIdx] = { ...updatedSegments[segIdx], audioUrl: result.audioUrl };
+                  setSegments([...updatedSegments]);
+                }
+                return result.audioUrl;
+              } else {
+                const errorMsg = data.msg || data.message || data.error || data.error_message || data.error_msg || data.error_description || (typeof data === 'object' ? JSON.stringify(data) : 'Có lỗi xảy ra khi gọi API.');
+                throw new Error(errorMsg);
+              }
             });
 
-            const data = await response.json().catch(() => ({ message: 'Không thể đọc phản hồi từ máy chủ.' }));
-            
-            if (response.ok && data.data && (data.data.taskId || data.data.id)) {
-              const result = await pollStatus(data.data.taskId || data.data.id, apiKey);
-              
-              // Update segment in our local copy
-              const segIdx = updatedSegments.findIndex(s => s.id === seg.id);
-              if (segIdx !== -1) {
-                updatedSegments[segIdx] = { ...updatedSegments[segIdx], audioUrl: result.audioUrl };
-                setSegments([...updatedSegments]);
-              }
-              return result.audioUrl;
-            } else {
-              const errorMsg = data.msg || data.message || data.error || data.error_message || data.error_msg || data.error_description || (typeof data === 'object' ? JSON.stringify(data) : 'Có lỗi xảy ra khi gọi API.');
-              throw new Error(errorMsg);
-            }
-          });
-
-          await Promise.all(batchPromises);
+            await Promise.all(batchPromises);
+          }
         }
 
         // Merge all audio results
@@ -948,7 +958,20 @@ export default function App() {
             const audioRes = await fetch(seg.audioUrl);
             const arrayBuffer = await audioRes.arrayBuffer();
             const buffer = await audioContext.decodeAudioData(arrayBuffer);
-            audioBuffers.push(buffer);
+            
+            // Check if we need to isolate a voice
+            const currentSegKey = getSegmentVoiceKey(seg);
+            if (isolateVoiceId && currentSegKey !== isolateVoiceId) {
+              // Replace with silence of the same duration
+              const silentBuffer = audioContext.createBuffer(
+                buffer.numberOfChannels,
+                buffer.length,
+                buffer.sampleRate
+              );
+              audioBuffers.push(silentBuffer);
+            } else {
+              audioBuffers.push(buffer);
+            }
           }
         }
 
@@ -1500,6 +1523,37 @@ export default function App() {
           <div className="flex-1 flex flex-col p-6 relative">
             {segments.length > 0 ? (
               <div className="space-y-4 max-h-[500px] overflow-y-auto p-2">
+                {/* Voice Isolation Controls */}
+                <div className="bg-blue-500/5 border border-blue-500/10 rounded-xl p-3 mb-2">
+                  <div className="flex items-center gap-2 text-[10px] font-bold text-blue-400 uppercase tracking-wider mb-2">
+                    <Mic size={12} />
+                    <span>Chế độ tách voice nhân vật:</span>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <button 
+                      onClick={() => setIsolateVoiceId(null)}
+                      className={`px-3 py-1 rounded-lg text-[10px] font-bold transition-all border ${isolateVoiceId === null ? 'bg-blue-600 border-blue-500 text-white' : 'bg-slate-800 border-slate-700 text-slate-400 hover:border-slate-600'}`}
+                    >
+                      Bình thường
+                    </button>
+                    {Array.from(new Set(segments.map(s => getSegmentVoiceKey(s)))).map(vKey => {
+                      const voiceObj = voices.find(v => v.id === vKey);
+                      const voiceName = voiceObj?.name || 'Giọng đọc';
+                      const charName = segments.find(s => getSegmentVoiceKey(s) === vKey)?.characterName;
+                      return (
+                        <button 
+                          key={vKey}
+                          onClick={() => setIsolateVoiceId(vKey)}
+                          className={`px-3 py-1 rounded-lg text-[10px] font-bold transition-all border ${isolateVoiceId === vKey ? 'bg-blue-600 border-blue-500 text-white' : 'bg-slate-800 border-slate-700 text-slate-400 hover:border-slate-600'}`}
+                        >
+                          Chỉ {charName || voiceName}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <p className="text-[9px] text-slate-500 mt-2 italic">* Khi chọn một nhân vật, các đoạn hội thoại của nhân vật khác sẽ được thay thế bằng khoảng lặng, giữ nguyên tổng thời lượng.</p>
+                </div>
+
                 <div className="flex justify-between items-center mb-2">
                   <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Danh sách đoạn hội thoại</h3>
                   <button 
@@ -1569,6 +1623,10 @@ export default function App() {
                       onChange={(e) => {
                         const newSegs = [...segments];
                         newSegs[idx].text = e.target.value;
+                        // Clear audioUrl if text changes
+                        if (newSegs[idx].audioUrl) {
+                          newSegs[idx].audioUrl = undefined;
+                        }
                         setSegments(newSegs);
                       }}
                       className="w-full bg-transparent border-none focus:ring-0 text-slate-200 text-sm leading-relaxed resize-none h-16"
@@ -2130,15 +2188,17 @@ export default function App() {
                           const charName = targetSegment.characterName;
                           if (charName) {
                             // Update all segments with the same character name
-                            setSegments(segments.map(s => s.characterName === charName ? { ...s, voice: voice.id } : s));
+                            setSegments(segments.map(s => s.characterName === charName ? { ...s, voice: voice.id, audioUrl: undefined } : s));
                           } else {
                             // Update only this segment
-                            setSegments(segments.map(s => s.id === activeSegmentId ? { ...s, voice: voice.id } : s));
+                            setSegments(segments.map(s => s.id === activeSegmentId ? { ...s, voice: voice.id, audioUrl: undefined } : s));
                           }
                         }
                         setActiveSegmentId(null);
                       } else {
                         setSelectedVoice(voice.id);
+                        // If global voice changes, we should probably clear segments that don't have a specific voice
+                        setSegments(segments.map(s => !s.voice ? { ...s, audioUrl: undefined } : s));
                       }
                       setIsVoiceModalOpen(false);
                     }}
