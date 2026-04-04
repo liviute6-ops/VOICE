@@ -1202,7 +1202,7 @@ export default function App() {
             
             <div className="flex flex-col sm:flex-row items-center justify-center gap-4 pt-4">
               <div className="flex-1 max-w-md w-full bg-[#0f111a] border border-slate-700 rounded-2xl px-6 py-4 flex items-center justify-between group hover:border-blue-500/50 transition-all">
-                <span className="font-mono font-bold text-xl text-blue-400 tracking-widest">MAZIAO-REF-2024</span>
+                <span className="font-mono font-bold text-xl text-blue-400 tracking-widest">VOICE-OFFICE-V1.0</span>
                 <button className="text-slate-500 hover:text-blue-400 transition-colors">
                   <RefreshCw size={20} />
                 </button>
@@ -1980,7 +1980,7 @@ export default function App() {
           <div className="bg-blue-600 p-1.5 rounded-lg text-white">
             <Mic size={20} />
           </div>
-          <span className="font-bold text-lg tracking-tight text-white">Maziao</span>
+          <span className="font-bold text-lg tracking-tight text-white uppercase tracking-widest">VOICE VĂN PHÒNG V1.0</span>
         </div>
 
         <nav className="flex-1 px-2 space-y-1">
@@ -2270,7 +2270,7 @@ export default function App() {
                       <label className="block text-xs font-bold text-slate-500 uppercase mb-1.5 ml-1">API Key</label>
                       <input 
                         type="password"
-                        placeholder="Nhập Maziao API Key"
+                        placeholder="Nhập API Key"
                         value={apiKey}
                         onChange={(e) => saveApiKey(e.target.value)}
                         className="w-full px-4 py-2.5 rounded-xl bg-[#0f111a] border border-slate-700/50 text-white focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
