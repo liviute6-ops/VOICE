@@ -15,6 +15,7 @@ import {
   User, 
   Type, 
   RefreshCw, 
+  Search,
   AlertCircle,
   Key,
   MessageSquare,
@@ -87,12 +88,16 @@ export default function App() {
   const [apiBaseUrl, setApiBaseUrl] = useState('/api/proxy/tts/submit');
   const [apiModels, setApiModels] = useState<any[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [showFindReplace, setShowFindReplace] = useState(false);
   const [isFetchingInfo, setIsFetchingInfo] = useState(false);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [srtUrl, setSrtUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [activeTab, setActiveTab] = useState('Chuyển Văn Bản');
+  const [concurrency, setConcurrency] = useState(5);
+  const [findWord, setFindWord] = useState('');
+  const [replaceWord, setReplaceWord] = useState('');
   const [splitType, setSplitType] = useState('prefix');
   const [exportSrt, setExportSrt] = useState(false);
   const [enableDuration, setEnableDuration] = useState(true);
@@ -127,6 +132,8 @@ export default function App() {
   const [editingVoiceName, setEditingVoiceName] = useState('');
   const [selectedCloneModel, setSelectedCloneModel] = useState(CLONE_MODELS[0].id);
   const [selectedGender, setSelectedGender] = useState('male');
+  const [selectedLanguage, setSelectedLanguage] = useState('Tiếng Việt');
+  const [referenceText, setReferenceText] = useState('');
 
   const fetchApiInfo = async (key: string) => {
     if (!key) {
@@ -605,6 +612,8 @@ export default function App() {
       formData.append('refFile', selectedFile);
       formData.append('gender', selectedGender);
       formData.append('model', selectedCloneModel);
+      formData.append('refText', referenceText);
+      formData.append('language', selectedLanguage === 'Tiếng Việt' ? 'vi' : selectedLanguage === 'English' ? 'en' : 'zh');
 
       const response = await fetch('/api/proxy/voices', {
         method: 'POST',
@@ -869,6 +878,34 @@ export default function App() {
     }
   };
 
+  const handleReplaceAll = () => {
+    if (!findWord) {
+      toast.error('Vui lòng nhập từ cần tìm.');
+      return;
+    }
+
+    const regex = new RegExp(findWord, 'g');
+    
+    // Replace in main text
+    const newText = text.replace(regex, replaceWord);
+    setText(newText);
+
+    // Replace in segments if they exist
+    if (segments.length > 0) {
+      const newSegments = segments.map(seg => ({
+        ...seg,
+        text: seg.text.replace(regex, replaceWord),
+        // Clear audioUrl if text changes
+        audioUrl: seg.text.replace(regex, replaceWord) !== seg.text ? undefined : seg.audioUrl
+      }));
+      setSegments(newSegments);
+    }
+
+    toast.success(`Đã thay thế tất cả các từ "${findWord}" bằng "${replaceWord}".`);
+    setFindWord('');
+    setReplaceWord('');
+  };
+
   const handleGenerate = async () => {
     if (!apiKey) {
       setError('Vui lòng nhập API Key trong phần cài đặt.');
@@ -921,8 +958,8 @@ export default function App() {
       const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
       
       if (validSegments.length > 0) {
-        // Process in batches of 5 for concurrency
-        const batchSize = 5;
+        // Process in batches for concurrency
+        const batchSize = concurrency;
         const updatedSegments = [...segments];
         
         // Only process segments that don't have an audioUrl yet
@@ -1302,32 +1339,32 @@ export default function App() {
           <h2 className="text-2xl font-bold text-white">Nhân bản giọng nói</h2>
           
           <div className="flex gap-6 items-start">
-            {/* Left Panel - Configuration */}
-            <div className="w-[350px] shrink-0 bg-[#1a1c2e] text-white rounded-2xl border border-slate-700/50 p-6 space-y-6 shadow-xl">
-              <div className="space-y-4">
-                <label className="block text-sm font-semibold text-slate-300">Chọn mô hình</label>
+            {/* Left Panel - Configuration - UPDATED UI to match image */}
+            <div className="w-[450px] shrink-0 bg-white text-slate-800 rounded-3xl p-8 space-y-6 shadow-xl border border-slate-200">
+              <div className="space-y-2">
+                <label className="block text-sm font-bold text-slate-700">Chọn mô hình</label>
                 <div className="relative">
                   <select 
                     value={selectedCloneModel}
                     onChange={(e) => setSelectedCloneModel(e.target.value)}
-                    className="w-full bg-[#0f111a] border border-slate-700 rounded-xl px-4 py-3 text-sm appearance-none focus:outline-none focus:ring-2 focus:ring-blue-500/50 text-white"
+                    className="w-full bg-white border border-blue-400 rounded-xl px-4 py-3 text-sm appearance-none focus:outline-none focus:ring-2 focus:ring-blue-500/20 text-slate-700"
                   >
                     {CLONE_MODELS.map(m => (
                       <option key={m.id} value={m.id}>{m.name}</option>
                     ))}
                   </select>
-                  <ChevronDown size={16} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" />
+                  <ChevronDown size={16} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
                 </div>
                 
-                <div className="bg-blue-900/20 border border-blue-500/20 rounded-xl p-3">
-                  <p className="text-[11px] text-blue-300 leading-relaxed">
-                    Ngôn ngữ được hỗ trợ: Tiếng Việt, Tiếng Anh, Tiếng Trung, Tiếng Hindi, Tiếng Pháp, Tiếng Thụy Sĩ... <span className="text-blue-400 cursor-pointer hover:underline">Xem thêm</span>
+                <div className="bg-blue-50 border border-blue-200 rounded-xl p-3">
+                  <p className="text-[12px] text-slate-600 leading-relaxed">
+                    Ngôn ngữ được hỗ trợ: Tiếng Việt, Tiếng Anh, Tiếng Trung, Tiếng Hindi, Tiếng Pháp, Tiếng Thụy Sĩ... <span className="text-blue-500 cursor-pointer hover:underline">Xem thêm</span>
                   </p>
                 </div>
               </div>
 
-              <div className="space-y-4">
-                <label className="block text-sm font-semibold text-slate-300">
+              <div className="space-y-2">
+                <label className="block text-sm font-bold text-slate-700">
                   <span className="text-red-500 mr-1">*</span>Tên giọng nói
                 </label>
                 <input 
@@ -1335,34 +1372,63 @@ export default function App() {
                   placeholder="Nhập tên giọng nói"
                   value={cloneName}
                   onChange={(e) => setCloneName(e.target.value)}
-                  className="w-full bg-[#0f111a] border border-slate-700 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/50 text-white"
+                  className="w-full bg-white border border-blue-400 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 text-slate-700 placeholder:text-slate-400"
                 />
               </div>
 
-              <div className="space-y-4">
-                <label className="block text-sm font-semibold text-slate-300">
-                  <span className="text-red-500 mr-1">*</span>Chọn giới tính
-                </label>
-                <div className="relative">
-                  <select 
-                    value={selectedGender}
-                    onChange={(e) => setSelectedGender(e.target.value)}
-                    className="w-full bg-[#0f111a] border border-slate-700 rounded-xl px-4 py-3 text-sm appearance-none focus:outline-none focus:ring-2 focus:ring-blue-500/50 text-white"
-                  >
-                    <option value="male">Nam</option>
-                    <option value="female">Nữ</option>
-                  </select>
-                  <ChevronDown size={16} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" />
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <label className="block text-sm font-bold text-slate-700">
+                    <span className="text-red-500 mr-1">*</span>Chọn giới tính
+                  </label>
+                  <div className="relative">
+                    <select 
+                      value={selectedGender}
+                      onChange={(e) => setSelectedGender(e.target.value)}
+                      className="w-full bg-white border border-blue-400 rounded-xl px-4 py-3 text-sm appearance-none focus:outline-none focus:ring-2 focus:ring-blue-500/20 text-slate-700"
+                    >
+                      <option value="male">Nam</option>
+                      <option value="female">Nữ</option>
+                    </select>
+                    <ChevronDown size={16} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <label className="block text-sm font-bold text-slate-700">
+                    <span className="text-red-500 mr-1">*</span>Language
+                  </label>
+                  <div className="relative">
+                    <select 
+                      value={selectedLanguage}
+                      onChange={(e) => setSelectedLanguage(e.target.value)}
+                      className="w-full bg-white border border-blue-400 rounded-xl px-4 py-3 text-sm appearance-none focus:outline-none focus:ring-2 focus:ring-blue-500/20 text-slate-700"
+                    >
+                      <option value="Tiếng Việt">Tiếng Việt</option>
+                      <option value="English">English</option>
+                      <option value="Chinese">Chinese</option>
+                    </select>
+                    <ChevronDown size={16} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+                  </div>
                 </div>
               </div>
 
-              <div className="space-y-4">
-                <label className="block text-sm font-semibold text-slate-300">
+              <div className="space-y-2">
+                <label className="block text-sm font-bold text-slate-700">Văn bản tham chiếu</label>
+                <textarea 
+                  placeholder="Nhập chính xác nội dung của giọng đọc (nên tự nhập để có chất lượng tốt hơn)"
+                  value={referenceText}
+                  onChange={(e) => setReferenceText(e.target.value)}
+                  className="w-full bg-white border border-blue-400 rounded-2xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 text-slate-700 placeholder:text-slate-400 h-24 resize-none"
+                />
+              </div>
+
+              <div className="space-y-2">
+                <label className="block text-sm font-bold text-slate-700">
                   <span className="text-red-500 mr-1">*</span>Tải lên tệp âm thanh
                 </label>
                 <div 
-                  className={`border-2 border-dashed rounded-2xl p-8 text-center transition-all cursor-pointer bg-[#0f111a] ${
-                    selectedFile ? 'border-blue-500 bg-blue-500/5' : 'border-slate-700 hover:border-slate-500'
+                  className={`border-2 border-dashed rounded-2xl p-8 text-center transition-all cursor-pointer bg-white ${
+                    selectedFile ? 'border-blue-500 border-solid bg-blue-50' : 'border-blue-400 border-dashed hover:border-blue-600'
                   }`}
                   onClick={() => document.getElementById('fileInput')?.click()}
                 >
@@ -1382,13 +1448,13 @@ export default function App() {
                     }}
                   />
                   <div className="flex flex-col items-center gap-3">
-                    <Upload size={32} className={selectedFile ? 'text-blue-500' : 'text-slate-500'} />
+                    <Upload size={40} className="text-slate-400" />
                     <div className="space-y-1">
-                      <div className="text-sm font-medium text-slate-300">
-                        {selectedFile ? selectedFile.name : 'Nhấp hoặc kéo để tải lên tại đây'}
+                      <div className="text-lg font-bold text-slate-700">
+                        Nhấp hoặc kéo để tải lên tại đây
                       </div>
-                      <div className="text-[11px] text-slate-500">
-                        Tự động cắt nếu trên 8 giây, tối đa 1MB<br />
+                      <div className="text-sm text-slate-500 font-medium">
+                        Thời lượng 3 giây - 8 giây, tối đa 1MB<br />
                         Hiện chỉ hỗ trợ: mp3, wav
                       </div>
                     </div>
@@ -1396,7 +1462,7 @@ export default function App() {
                 </div>
                 
                 {selectedFile && (
-                  <div className="flex items-center gap-3 bg-blue-500/10 border border-blue-500/20 rounded-xl p-3">
+                  <div className="flex items-center gap-3 bg-blue-50 border border-blue-200 rounded-xl p-3">
                     <button 
                       onClick={(e) => {
                         e.stopPropagation();
@@ -1409,15 +1475,15 @@ export default function App() {
                       <Play size={14} fill="currentColor" />
                     </button>
                     <div className="flex-1 min-w-0">
-                      <div className="text-xs font-medium text-blue-300 truncate">{selectedFile.name}</div>
-                      <div className="text-[10px] text-blue-400/60">Sẵn sàng để nhân bản</div>
+                      <div className="text-xs font-bold text-blue-600 truncate">{selectedFile.name}</div>
+                      <div className="text-[10px] text-blue-500/60">Sẵn sàng để nhân bản</div>
                     </div>
                     <button 
                       onClick={(e) => {
                         e.stopPropagation();
                         setSelectedFile(null);
                       }}
-                      className="p-1.5 text-slate-500 hover:text-red-500 hover:bg-red-500/10 rounded-md transition-all"
+                      className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-md transition-all"
                     >
                       <X size={14} />
                     </button>
@@ -1425,17 +1491,19 @@ export default function App() {
                 )}
               </div>
 
-              <button 
-                onClick={handleCloneVoice}
-                disabled={isCloning || !cloneName || !selectedFile}
-                className={`w-full py-3.5 rounded-full font-bold text-sm transition-all ${
-                  isCloning || !cloneName || !selectedFile
-                  ? 'bg-slate-800 text-slate-500 cursor-not-allowed' 
-                  : 'bg-blue-600 hover:bg-blue-700 text-white shadow-lg shadow-blue-900/20'
-                }`}
-              >
-                {isCloning ? <RefreshCw size={18} className="animate-spin mx-auto" /> : 'Nhân bản giọng nói'}
-              </button>
+              <div className="flex justify-end pt-4">
+                <button 
+                  onClick={handleCloneVoice}
+                  disabled={isCloning || !cloneName || !selectedFile}
+                  className={`px-8 py-3 rounded-full font-bold text-sm transition-all ${
+                    isCloning || !cloneName || !selectedFile
+                    ? 'bg-slate-100 text-slate-400 cursor-not-allowed border border-slate-200' 
+                    : 'bg-slate-100 hover:bg-blue-600 hover:text-white text-slate-400 border border-slate-200 transition-all'
+                  }`}
+                >
+                  {isCloning ? <RefreshCw size={18} className="animate-spin mx-auto" /> : 'Nhân bản giọng nói'}
+                </button>
+              </div>
             </div>
 
             {/* Right Panel - List */}
@@ -1634,6 +1702,13 @@ export default function App() {
             </div>
             <div className="flex items-center gap-2">
               <button 
+                onClick={() => setShowFindReplace(!showFindReplace)}
+                className={`flex items-center gap-2 px-3 py-1.5 text-xs font-bold rounded-lg transition-all border ${showFindReplace ? 'bg-blue-600 border-blue-500 text-white' : 'text-slate-400 border-slate-700/50 hover:bg-slate-700/30'}`}
+              >
+                <Search size={14} />
+                <span>Tìm & Thay thế</span>
+              </button>
+              <button 
                 disabled={!text.trim() || isGenerating}
                 onClick={handleGenerate}
                 className="flex items-center gap-2 px-3 py-1.5 text-xs font-bold text-slate-400 border border-slate-700/50 rounded-lg hover:bg-slate-700/30 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
@@ -1645,6 +1720,52 @@ export default function App() {
           </div>
 
           <div className="flex-1 flex flex-col p-6 relative">
+            <AnimatePresence>
+              {showFindReplace && (
+                <motion.div 
+                  initial={{ height: 0, opacity: 0 }}
+                  animate={{ height: 'auto', opacity: 1 }}
+                  exit={{ height: 0, opacity: 0 }}
+                  className="overflow-hidden mb-4"
+                >
+                  <div className="bg-[#0f111a] p-4 rounded-xl border border-blue-500/30 flex flex-col sm:flex-row items-end gap-3">
+                    <div className="flex-1 space-y-1.5">
+                      <label className="text-[10px] font-bold text-slate-500 uppercase ml-1">Tìm từ</label>
+                      <input 
+                        type="text"
+                        value={findWord}
+                        onChange={(e) => setFindWord(e.target.value)}
+                        placeholder="Nhập từ cần tìm..."
+                        className="w-full bg-[#1a1c2e] border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      />
+                    </div>
+                    <div className="flex-1 space-y-1.5">
+                      <label className="text-[10px] font-bold text-slate-500 uppercase ml-1">Thay thế bằng</label>
+                      <input 
+                        type="text"
+                        value={replaceWord}
+                        onChange={(e) => setReplaceWord(e.target.value)}
+                        placeholder="Nhập từ thay thế..."
+                        className="w-full bg-[#1a1c2e] border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      />
+                    </div>
+                    <button 
+                      onClick={handleReplaceAll}
+                      className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-lg transition-all shadow-lg shadow-blue-900/20 whitespace-nowrap"
+                    >
+                      Thay thế tất cả
+                    </button>
+                    <button 
+                      onClick={() => setShowFindReplace(false)}
+                      className="p-2 text-slate-500 hover:text-white transition-colors"
+                    >
+                      <X size={16} />
+                    </button>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
             {segments.length > 0 ? (
               <div className="space-y-4 max-h-[500px] overflow-y-auto p-2">
                 {/* Voice Isolation Controls */}
@@ -1931,6 +2052,60 @@ export default function App() {
         {/* Right Sidebar Config */}
         <div className="w-80 h-full overflow-y-auto pr-1 space-y-4 shrink-0 custom-scrollbar">
           <div className="bg-[#1a1c2e] p-6 rounded-2xl border border-slate-700/50 shadow-xl space-y-6">
+            {activeTab === 'Hội Thoại' && (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <div className="text-sm font-bold text-slate-300">Số luồng chạy</div>
+                  <div className="px-2 py-0.5 bg-blue-600/10 rounded text-[10px] font-bold text-blue-400 uppercase tracking-wider">
+                    {concurrency === 999 ? 'Tất cả' : `${concurrency} luồng`}
+                  </div>
+                </div>
+                <div className="space-y-3">
+                  <div className="flex justify-between text-[10px] font-bold text-slate-500 uppercase tracking-widest">
+                    <span>Chậm (1)</span>
+                    <span>Nhanh (20)</span>
+                  </div>
+                  <input 
+                    type="range" 
+                    min="1" 
+                    max="20" 
+                    step="1"
+                    value={concurrency === 999 ? 20 : concurrency}
+                    onChange={(e) => setConcurrency(parseInt(e.target.value))}
+                    className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                  />
+                  <div className="flex justify-between gap-2 flex-wrap">
+                    {[1, 5, 10, 20].map((val) => (
+                      <button
+                        key={val}
+                        onClick={() => setConcurrency(val)}
+                        className={`flex-1 py-1 rounded text-[10px] font-bold transition-all border ${
+                          concurrency === val 
+                          ? 'bg-blue-600 border-blue-500 text-white' 
+                          : 'bg-slate-800 border-slate-700 text-slate-500 hover:text-slate-300'
+                        }`}
+                      >
+                        {val}
+                      </button>
+                    ))}
+                    <button
+                      onClick={() => setConcurrency(999)}
+                      className={`flex-1 py-1 rounded text-[10px] font-bold transition-all border ${
+                        concurrency === 999 
+                        ? 'bg-blue-600 border-blue-500 text-white' 
+                        : 'bg-slate-800 border-slate-700 text-slate-500 hover:text-slate-300'
+                      }`}
+                    >
+                      Tất cả
+                    </button>
+                  </div>
+                  <p className="text-[10px] text-slate-500 italic leading-relaxed">
+                    * Số luồng chạy đồng thời. Tăng số luồng giúp xử lý nhanh hơn nhưng có thể gây lỗi nếu vượt quá giới hạn API.
+                  </p>
+                </div>
+              </div>
+            )}
+
             {activeTab !== 'Hội Thoại' && (
               <div className="space-y-4">
                 <div className="flex items-center justify-between">
