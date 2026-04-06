@@ -6,6 +6,8 @@
 import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import toast, { Toaster } from 'react-hot-toast';
+import { useLiveQuery } from 'dexie-react-hooks';
+import { db_history } from './db';
 import { 
   Mic, 
   Play, 
@@ -76,6 +78,178 @@ const CLONE_MODELS = [
   { id: 'jeck_speech', name: 'Jeck Speech' },
 ];
 
+// Sub-component for History Item to manage object URLs
+const HistoryItemCard = ({ item, onDelete }: any) => {
+  const [mergedUrl, setMergedUrl] = useState<string>('');
+  const [charUrls, setCharUrls] = useState<{ audio: string; compact: string }[]>([]);
+  const [playingIdx, setPlayingIdx] = useState<number | null>(null);
+  const [playingCompactIdx, setPlayingCompactIdx] = useState<number | null>(null);
+  const audioRefs = useRef<(HTMLAudioElement | null)[]>([]);
+  const compactAudioRefs = useRef<(HTMLAudioElement | null)[]>([]);
+
+  useEffect(() => {
+    const mUrl = URL.createObjectURL(item.mergedAudio);
+    const cUrls = item.characterAudios.map((ca: any) => ({
+      audio: URL.createObjectURL(ca.audio),
+      compact: ca.compactAudio ? URL.createObjectURL(ca.compactAudio) : ''
+    }));
+    setMergedUrl(mUrl);
+    setCharUrls(cUrls);
+
+    return () => {
+      URL.revokeObjectURL(mUrl);
+      cUrls.forEach((urls: any) => {
+        URL.revokeObjectURL(urls.audio);
+        if (urls.compact) URL.revokeObjectURL(urls.compact);
+      });
+    };
+  }, [item]);
+
+  const togglePlay = (idx: number, isCompact: boolean = false) => {
+    const refs = isCompact ? compactAudioRefs : audioRefs;
+    const currentPlayingIdx = isCompact ? playingCompactIdx : playingIdx;
+    const setCurrentPlayingIdx = isCompact ? setPlayingCompactIdx : setPlayingIdx;
+    const otherPlayingIdx = isCompact ? playingIdx : playingCompactIdx;
+    const setOtherPlayingIdx = isCompact ? setPlayingIdx : setPlayingCompactIdx;
+    const otherRefs = isCompact ? audioRefs : compactAudioRefs;
+
+    const audio = refs.current[idx];
+    if (!audio) return;
+
+    if (currentPlayingIdx === idx) {
+      audio.pause();
+      setCurrentPlayingIdx(null);
+    } else {
+      // Stop current playing in same group
+      if (currentPlayingIdx !== null && refs.current[currentPlayingIdx]) {
+        refs.current[currentPlayingIdx]?.pause();
+      }
+      // Stop playing in other group
+      if (otherPlayingIdx !== null && otherRefs.current[otherPlayingIdx]) {
+        otherRefs.current[otherPlayingIdx]?.pause();
+        setOtherPlayingIdx(null);
+      }
+      audio.play();
+      setCurrentPlayingIdx(idx);
+    }
+  };
+
+  return (
+    <div className="bg-[#1a1c2e] rounded-2xl border border-slate-700/50 overflow-hidden shadow-xl">
+      <div className="p-6 border-b border-slate-700/30 flex justify-between items-start">
+        <div className="space-y-1">
+          <div className="text-xs font-bold text-blue-400 uppercase tracking-wider">
+            {new Date(item.timestamp).toLocaleString('vi-VN')}
+          </div>
+          <p className="text-sm text-slate-300 line-clamp-2 max-w-2xl">{item.text}</p>
+        </div>
+        <button 
+          onClick={() => onDelete(item.id!)}
+          className="p-2 text-slate-500 hover:text-red-500 hover:bg-red-500/10 rounded-lg transition-all"
+        >
+          <Trash2 size={18} />
+        </button>
+      </div>
+      
+      <div className="p-6 bg-[#0f111a]/50 grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Merged Audio */}
+        <div className="space-y-3">
+          <div className="flex items-center gap-2 text-xs font-bold text-slate-500 uppercase tracking-wider">
+            <Zap size={14} className="text-blue-400" />
+            <span>Hội thoại gộp (Full)</span>
+          </div>
+          <div className="bg-[#1a1c2e] p-4 rounded-xl border border-slate-700/50 flex items-center gap-4">
+            <audio controls src={mergedUrl} className="flex-1 h-10 invert brightness-200" />
+            <a 
+              href={mergedUrl} 
+              download={`merged_${new Date(item.timestamp).getTime()}.wav`}
+              className="p-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-all"
+            >
+              <Download size={18} />
+            </a>
+          </div>
+        </div>
+
+        {/* Character Audios */}
+        <div className="space-y-3">
+          <div className="flex items-center gap-2 text-xs font-bold text-slate-500 uppercase tracking-wider">
+            <Mic size={14} className="text-purple-400" />
+            <span>Tách nhân vật (Có im lặng & Chỉ giọng)</span>
+          </div>
+          <div className="grid grid-cols-1 gap-2 max-h-[300px] overflow-y-auto pr-2 custom-scrollbar">
+            {item.characterAudios.map((char: any, idx: number) => (
+              <div key={idx} className="bg-[#1a1c2e] p-3 rounded-xl border border-slate-700/50 flex flex-col gap-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <User size={14} className="text-slate-500 shrink-0" />
+                    <span className="text-xs font-bold text-slate-300 truncate">{char.name}</span>
+                  </div>
+                </div>
+                
+                <div className="flex flex-col gap-2">
+                  {/* Isolated (with silence) */}
+                  <div className="flex items-center justify-between bg-[#0f111a]/50 p-2 rounded-lg border border-slate-800/50">
+                    <span className="text-[9px] text-slate-500 font-bold uppercase">Có im lặng</span>
+                    <div className="flex items-center gap-2">
+                      <audio 
+                        src={charUrls[idx]?.audio} 
+                        className="hidden" 
+                        ref={el => audioRefs.current[idx] = el}
+                        onEnded={() => setPlayingIdx(null)}
+                      />
+                      <button 
+                        onClick={() => togglePlay(idx, false)}
+                        className="p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-400 rounded-lg"
+                      >
+                        {playingIdx === idx ? <Volume2 size={12} className="text-blue-400" /> : <Play size={12} fill="currentColor" />}
+                      </button>
+                      <a 
+                        href={charUrls[idx]?.audio} 
+                        download={`${char.name}_full_${new Date(item.timestamp).getTime()}.wav`}
+                        className="p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-400 rounded-lg"
+                      >
+                        <Download size={12} />
+                      </a>
+                    </div>
+                  </div>
+
+                  {/* Compact (voice only) */}
+                  {charUrls[idx]?.compact && (
+                    <div className="flex items-center justify-between bg-blue-900/10 p-2 rounded-lg border border-blue-500/10">
+                      <span className="text-[9px] text-blue-400/70 font-bold uppercase">Chỉ giọng</span>
+                      <div className="flex items-center gap-2">
+                        <audio 
+                          src={charUrls[idx]?.compact} 
+                          className="hidden" 
+                          ref={el => compactAudioRefs.current[idx] = el}
+                          onEnded={() => setPlayingCompactIdx(null)}
+                        />
+                        <button 
+                          onClick={() => togglePlay(idx, true)}
+                          className="p-1.5 bg-blue-900/20 hover:bg-blue-900/40 text-blue-400 rounded-lg"
+                        >
+                          {playingCompactIdx === idx ? <Volume2 size={12} className="text-blue-400" /> : <Play size={12} fill="currentColor" />}
+                        </button>
+                        <a 
+                          href={charUrls[idx]?.compact} 
+                          download={`${char.name}_voice_only_${new Date(item.timestamp).getTime()}.wav`}
+                          className="p-1.5 bg-blue-900/20 hover:bg-blue-900/40 text-blue-400 rounded-lg"
+                        >
+                          <Download size={12} />
+                        </a>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 export default function App() {
   const [text, setText] = useState('');
   const [voices, setVoices] = useState<Voice[]>(DEFAULT_VOICES);
@@ -95,6 +269,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [activeTab, setActiveTab] = useState('Chuyển Văn Bản');
+  const historyItems = useLiveQuery(() => db_history.history.orderBy('timestamp').reverse().toArray());
   const [concurrency, setConcurrency] = useState(5);
   const [findWord, setFindWord] = useState('');
   const [replaceWord, setReplaceWord] = useState('');
@@ -449,7 +624,7 @@ export default function App() {
   };
 
   // Function to download audio with specific character only
-  const downloadCharacterAudio = async (targetCharName: string | null) => {
+  const downloadCharacterAudio = async (targetCharName: string | null, compact: boolean = false) => {
     if (segments.length === 0) return;
     
     try {
@@ -468,15 +643,22 @@ export default function App() {
         const arrayBuffer = await audioRes.arrayBuffer();
         const buffer = await audioContext.decodeAudioData(arrayBuffer);
         
-        // If targetCharName is provided, mute segments that don't match
-        if (targetCharName && seg.characterName !== targetCharName) {
-          const silentBuffer = audioContext.createBuffer(
-            buffer.numberOfChannels,
-            buffer.length,
-            buffer.sampleRate
-          );
-          audioBuffers.push(silentBuffer);
+        // If targetCharName is provided
+        if (targetCharName) {
+          if (seg.characterName === targetCharName) {
+            audioBuffers.push(buffer);
+          } else if (!compact) {
+            // Add silence if not in compact mode
+            const silentBuffer = audioContext.createBuffer(
+              buffer.numberOfChannels,
+              buffer.length,
+              buffer.sampleRate
+            );
+            audioBuffers.push(silentBuffer);
+          }
+          // If compact and not targetCharName, we just skip it
         } else {
+          // No targetCharName, add all (merged audio)
           audioBuffers.push(buffer);
         }
       }
@@ -487,11 +669,17 @@ export default function App() {
         const url = URL.createObjectURL(wavBlob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = targetCharName ? `audio_${targetCharName}.wav` : `audio_merged.wav`;
+        const filename = targetCharName 
+          ? (compact ? `voice_only_${targetCharName}.wav` : `audio_${targetCharName}.wav`)
+          : `audio_merged.wav`;
+        a.download = filename;
         a.click();
         URL.revokeObjectURL(url);
         toast.dismiss();
         toast.success("Tải xuống thành công!");
+      } else {
+        toast.dismiss();
+        toast.error("Không tìm thấy âm thanh cho nhân vật này.");
       }
     } catch (error) {
       console.error("Error processing audio:", error);
@@ -502,57 +690,69 @@ export default function App() {
 
   // Helper to convert AudioBuffer to WAV
   const bufferToWav = (buffer: AudioBuffer) => {
-    const numOfChan = buffer.numberOfChannels;
-    const length = buffer.length * numOfChan * 2 + 44;
-    const buffer_arr = new ArrayBuffer(length);
-    const view = new DataView(buffer_arr);
-    const channels = [];
-    let i;
-    let sample;
-    let offset = 0;
-    let pos = 0;
-
-    const setUint16 = (data: number) => {
-      view.setUint16(pos, data, true);
-      pos += 2;
-    };
-
-    const setUint32 = (data: number) => {
-      view.setUint32(pos, data, true);
-      pos += 4;
-    };
-
-    // write WAVE header
-    setUint32(0x46464952);                         // "RIFF"
-    setUint32(length - 8);                         // file length - 8
-    setUint32(0x45564157);                         // "WAVE"
-
-    setUint32(0x20746d66);                         // "fmt " chunk
-    setUint32(16);                                 // length = 16
-    setUint16(1);                                  // PCM (uncompressed)
-    setUint16(numOfChan);
-    setUint32(buffer.sampleRate);
-    setUint32(buffer.sampleRate * 2 * numOfChan);  // avg. bytes/sec
-    setUint16(numOfChan * 2);                      // block-align
-    setUint16(16);                                 // 16-bit (hardcoded)
-
-    setUint32(0x61746164);                         // "data" - chunk
-    setUint32(length - pos - 4);                   // chunk length
-
-    for(i = 0; i < buffer.numberOfChannels; i++)
-      channels.push(buffer.getChannelData(i));
-
-    while(pos < length) {
-      for(i = 0; i < numOfChan; i++) {             // interleave channels
-        sample = Math.max(-1, Math.min(1, channels[i][offset])); // clamp
-        sample = (sample < 0 ? sample * 0x8000 : sample * 0x7FFF) | 0; // scale to 16-bit signed int
-        view.setInt16(pos, sample, true);          // write 16-bit sample
-        pos += 2;
+    try {
+      const numOfChan = buffer.numberOfChannels;
+      const length = buffer.length * numOfChan * 2 + 44;
+      
+      // Log size for debugging large files
+      if (length > 100 * 1024 * 1024) { // > 100MB
+        console.log(`Creating large WAV: ${(length / 1024 / 1024).toFixed(2)} MB`);
       }
-      offset++;                                     // next source sample
-    }
 
-    return new Blob([buffer_arr], {type: "audio/wav"});
+      const buffer_arr = new ArrayBuffer(length);
+      const view = new DataView(buffer_arr);
+      const channels = [];
+      let i;
+      let sample;
+      let offset = 0;
+      let pos = 0;
+
+      const setUint16 = (data: number) => {
+        view.setUint16(pos, data, true);
+        pos += 2;
+      };
+
+      const setUint32 = (data: number) => {
+        view.setUint32(pos, data, true);
+        pos += 4;
+      };
+
+      // write WAVE header
+      setUint32(0x46464952);                         // "RIFF"
+      setUint32(length - 8);                         // file length - 8
+      setUint32(0x45564157);                         // "WAVE"
+
+      setUint32(0x20746d66);                         // "fmt " chunk
+      setUint32(16);                                 // length = 16
+      setUint16(1);                                  // PCM (uncompressed)
+      setUint16(numOfChan);
+      setUint32(buffer.sampleRate);
+      setUint32(buffer.sampleRate * 2 * numOfChan);  // avg. bytes/sec
+      setUint16(numOfChan * 2);                      // block-align
+      setUint16(16);                                 // 16-bit (hardcoded)
+
+      setUint32(0x61746164);                         // "data" - chunk
+      setUint32(length - pos - 4);                   // chunk length
+
+      for(i = 0; i < buffer.numberOfChannels; i++)
+        channels.push(buffer.getChannelData(i));
+
+      while(pos < length) {
+        for(i = 0; i < numOfChan; i++) {             // interleave channels
+          sample = Math.max(-1, Math.min(1, channels[i][offset])); // clamp
+          sample = (sample < 0 ? sample * 0x8000 : sample * 0x7FFF) | 0; // scale to 16-bit signed int
+          view.setInt16(pos, sample, true);          // write 16-bit sample
+          pos += 2;
+        }
+        offset++;                                     // next source sample
+      }
+
+      return new Blob([buffer_arr], {type: "audio/wav"});
+    } catch (e) {
+      console.error("Failed to create WAV blob:", e);
+      // Return a small empty blob as fallback to prevent crash
+      return new Blob([], {type: "audio/wav"});
+    }
   };
 
   const trimAudioFile = async (file: File): Promise<File> => {
@@ -1029,36 +1229,90 @@ export default function App() {
 
         // Merge all audio results
         toast.loading("Đang gộp toàn bộ âm thanh...", { id: 'gen-status' });
-        const audioBuffers: AudioBuffer[] = [];
         const finalSegments = updatedSegments.filter(s => s.audioUrl);
         
+        // Pre-decode all buffers once to reuse
+        const decodedBuffers: AudioBuffer[] = [];
         for (const seg of finalSegments) {
-          if (seg.audioUrl) {
-            const audioRes = await fetch(seg.audioUrl);
-            const arrayBuffer = await audioRes.arrayBuffer();
-            const buffer = await audioContext.decodeAudioData(arrayBuffer);
-            
-            // Check if we need to isolate a voice
+          const audioRes = await fetch(seg.audioUrl!);
+          const arrayBuffer = await audioRes.arrayBuffer();
+          const buffer = await audioContext.decodeAudioData(arrayBuffer);
+          decodedBuffers.push(buffer);
+        }
+
+        if (decodedBuffers.length > 0) {
+          // 1. Create main merged audio (respecting isolation if active)
+          const mainBuffers: AudioBuffer[] = [];
+          for (let i = 0; i < finalSegments.length; i++) {
+            const seg = finalSegments[i];
+            const buffer = decodedBuffers[i];
             const currentSegKey = getSegmentVoiceKey(seg);
+            
             if (isolateVoiceId && currentSegKey !== isolateVoiceId) {
-              // Replace with silence of the same duration
               const silentBuffer = audioContext.createBuffer(
                 buffer.numberOfChannels,
                 buffer.length,
                 buffer.sampleRate
               );
-              audioBuffers.push(silentBuffer);
+              mainBuffers.push(silentBuffer);
             } else {
-              audioBuffers.push(buffer);
+              mainBuffers.push(buffer);
             }
           }
-        }
 
-        if (audioBuffers.length > 0) {
-          const mergedBuffer = mergeAudioBuffers(audioBuffers, audioContext);
+          const mergedBuffer = mergeAudioBuffers(mainBuffers, audioContext);
           const wavBlob = bufferToWav(mergedBuffer);
           const finalUrl = URL.createObjectURL(wavBlob);
           setAudioUrl(finalUrl);
+
+          // 2. Save to History (IndexedDB) - Optimized
+          try {
+            const uniqueCharacters = Array.from(new Set(finalSegments.map(s => s.characterName || voices.find(v => v.id === s.voice)?.name || 'Giọng đọc')));
+            const characterAudios: { name: string; audio: Blob; compactAudio?: Blob }[] = [];
+
+            // Create a full merged version for history (without isolation)
+            const fullMergedBuffer = mergeAudioBuffers(decodedBuffers, audioContext);
+            const fullWavBlob = bufferToWav(fullMergedBuffer);
+
+            for (const charName of uniqueCharacters) {
+              const isolatedBuffers: AudioBuffer[] = [];
+              const compactBuffers: AudioBuffer[] = [];
+              for (let i = 0; i < finalSegments.length; i++) {
+                const seg = finalSegments[i];
+                const buffer = decodedBuffers[i];
+                const segCharName = seg.characterName || voices.find(v => v.id === seg.voice)?.name || 'Giọng đọc';
+
+                if (segCharName === charName) {
+                  isolatedBuffers.push(buffer);
+                  compactBuffers.push(buffer);
+                } else {
+                  const silentBuffer = audioContext.createBuffer(
+                    buffer.numberOfChannels,
+                    buffer.length,
+                    buffer.sampleRate
+                  );
+                  isolatedBuffers.push(silentBuffer);
+                }
+              }
+              const isolatedMerged = mergeAudioBuffers(isolatedBuffers, audioContext);
+              const compactMerged = mergeAudioBuffers(compactBuffers, audioContext);
+              
+              characterAudios.push({ 
+                name: charName, 
+                audio: bufferToWav(isolatedMerged),
+                compactAudio: bufferToWav(compactMerged)
+              });
+            }
+
+            await db_history.history.add({
+              timestamp: new Date(),
+              text: textToConvert,
+              mergedAudio: fullWavBlob,
+              characterAudios
+            });
+          } catch (historyErr) {
+            console.error('Failed to save to history:', historyErr);
+          }
         }
       } else {
         // Single text generation
@@ -1111,11 +1365,18 @@ export default function App() {
           setAudioUrl(finalUrl);
           if (result.srtUrl) setSrtUrl(result.srtUrl);
           
-          addToHistory({ 
-            text: textToConvert.slice(0, 100) + '...', 
-            voice: voices.find(v => v.id === selectedVoice)?.name || selectedVoice, 
-            url: finalUrl 
-          });
+          // Save to History (IndexedDB)
+          try {
+            const charName = voices.find(v => v.id === selectedVoice)?.name || 'Giọng đọc';
+            await db_history.history.add({
+              timestamp: new Date(),
+              text: textToConvert,
+              mergedAudio: wavBlob,
+              characterAudios: [{ name: charName, audio: wavBlob }] // For single text, character audio is same as merged
+            });
+          } catch (historyErr) {
+            console.error('Failed to save to history:', historyErr);
+          }
           
           fetchApiInfo(apiKey);
           toast.success("Hoàn thành!", { id: 'gen-status' });
@@ -1142,9 +1403,44 @@ export default function App() {
     { name: 'Tạo Ảnh', icon: <ImageIcon size={18} /> },
     { name: 'Nạp Credits', icon: <Zap size={18} />, badge: '+10%' },
     { name: 'Giới thiệu bạn bè', icon: <UserPlus size={18} /> },
+    { name: 'Lịch sử', icon: <Clock size={18} /> },
   ];
 
   const renderContent = () => {
+    if (activeTab === 'Lịch sử') {
+      return (
+        <div className="max-w-5xl mx-auto space-y-6">
+          <div className="flex items-center justify-between">
+            <h2 className="text-2xl font-bold text-white">Kho lưu trữ lịch sử</h2>
+            <div className="text-sm text-slate-400">{historyItems?.length || 0} bản ghi</div>
+          </div>
+
+          <div className="space-y-4">
+            {historyItems?.length === 0 ? (
+              <div className="bg-[#1a1c2e] p-20 rounded-3xl border border-slate-700/50 text-center space-y-4">
+                <div className="inline-flex p-6 bg-slate-800 text-slate-500 rounded-full">
+                  <Clock size={48} />
+                </div>
+                <p className="text-slate-400">Chưa có lịch sử hội thoại nào được lưu lại.</p>
+              </div>
+            ) : (
+              historyItems?.map((item) => (
+                <HistoryItemCard 
+                  key={item.id} 
+                  item={item} 
+                  onDelete={(id) => {
+                    if (confirm('Bạn có chắc chắn muốn xoá bản ghi này?')) {
+                      db_history.history.delete(id);
+                    }
+                  }} 
+                />
+              ))
+            )}
+          </div>
+        </div>
+      );
+    }
+
     if (activeTab === 'Thành viên') {
       return (
         <div className="max-w-4xl mx-auto space-y-8">
@@ -2021,19 +2317,37 @@ export default function App() {
                 </div>
                 
                 {segments.length > 0 && (
-                  <div className="space-y-2 border-t border-slate-800 pt-2">
-                    <p className="text-[10px] uppercase tracking-wider font-bold text-slate-500">Tải theo nhân vật (giữ khoảng lặng)</p>
-                    <div className="flex flex-wrap gap-2">
-                      {Array.from(new Set(segments.map(s => s.characterName).filter(Boolean))).map((name) => (
-                        <button
-                          key={name as string}
-                          onClick={() => downloadCharacterAudio(name as string)}
-                          className="flex items-center gap-2 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-bold rounded-lg border border-slate-700 transition-all"
-                        >
-                          <User size={12} />
-                          {name}
-                        </button>
-                      ))}
+                  <div className="space-y-4 border-t border-slate-800 pt-4">
+                    <div className="space-y-2">
+                      <p className="text-[10px] uppercase tracking-wider font-bold text-slate-500">Tải theo nhân vật (giữ khoảng lặng)</p>
+                      <div className="flex flex-wrap gap-2">
+                        {Array.from(new Set(segments.map(s => s.characterName).filter(Boolean))).map((name) => (
+                          <button
+                            key={name as string}
+                            onClick={() => downloadCharacterAudio(name as string, false)}
+                            className="flex items-center gap-2 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-bold rounded-lg border border-slate-700 transition-all"
+                          >
+                            <User size={12} />
+                            {name}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="space-y-2">
+                      <p className="text-[10px] uppercase tracking-wider font-bold text-slate-500">Tải chỉ giọng nhân vật (gộp lại)</p>
+                      <div className="flex flex-wrap gap-2">
+                        {Array.from(new Set(segments.map(s => s.characterName).filter(Boolean))).map((name) => (
+                          <button
+                            key={name as string}
+                            onClick={() => downloadCharacterAudio(name as string, true)}
+                            className="flex items-center gap-2 px-3 py-1.5 bg-blue-900/20 hover:bg-blue-900/40 text-blue-400 text-[10px] font-bold rounded-lg border border-blue-500/30 transition-all"
+                          >
+                            <Mic size={12} />
+                            {name}
+                          </button>
+                        ))}
+                      </div>
                     </div>
                   </div>
                 )}
