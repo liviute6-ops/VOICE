@@ -297,6 +297,10 @@ export default function App() {
   const [regUsername, setRegUsername] = useState('');
   const [regPassword, setRegPassword] = useState('');
   const [isRegistering, setIsRegistering] = useState(false);
+  
+  // New state for sequential download naming
+  const [leftCharacter, setLeftCharacter] = useState<string>('');
+  const [rightCharacter, setRightCharacter] = useState<string>('');
 
   // Voice Cloning State
   const [clonedVoices, setClonedVoices] = useState<{id: string, name: string, status: string, gender?: string, language?: string, previewUrl?: string}[]>([]);
@@ -624,6 +628,192 @@ export default function App() {
   };
 
   // Function to download audio with specific character only
+  const downloadSingleSegment = async (segId: string) => {
+    const seg = segments.find(s => s.id === segId);
+    if (!seg || !seg.audioUrl) return;
+
+    try {
+      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const audioRes = await fetch(seg.audioUrl);
+      const arrayBuffer = await audioRes.arrayBuffer();
+      const buffer = await audioContext.decodeAudioData(arrayBuffer);
+      
+      const duration = buffer.duration;
+      const globalIdx = segments.findIndex(s => s.id === seg.id) + 1;
+      
+      let baseName = "voice";
+      if (seg.characterName === leftCharacter) baseName = "trái";
+      else if (seg.characterName === rightCharacter) baseName = "phải";
+      else if (seg.characterName) baseName = seg.characterName;
+
+      const downloadFile = (blob: Blob, filename: string) => {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 100);
+      };
+
+      if (duration > 180) {
+        const halfLength = Math.floor(buffer.length / 2);
+        const part1Buffer = audioContext.createBuffer(buffer.numberOfChannels, halfLength, buffer.sampleRate);
+        for (let channel = 0; channel < buffer.numberOfChannels; channel++) {
+          part1Buffer.copyToChannel(buffer.getChannelData(channel).slice(0, halfLength), channel);
+        }
+        downloadFile(bufferToWav(part1Buffer), `${baseName}_${globalIdx}_part1.wav`);
+
+        const part2Buffer = audioContext.createBuffer(buffer.numberOfChannels, buffer.length - halfLength, buffer.sampleRate);
+        for (let channel = 0; channel < buffer.numberOfChannels; channel++) {
+          part2Buffer.copyToChannel(buffer.getChannelData(channel).slice(halfLength), channel);
+        }
+        downloadFile(bufferToWav(part2Buffer), `${baseName}_${globalIdx}_part2.wav`);
+      } else {
+        downloadFile(bufferToWav(buffer), `${baseName}_${globalIdx}.wav`);
+      }
+    } catch (error) {
+      console.error("Error downloading single segment:", error);
+      toast.error("Lỗi khi tải đoạn hội thoại.");
+    }
+  };
+
+  const downloadCharacterSegmentsIndividually = async (targetCharName: string, label: string) => {
+    if (!targetCharName) {
+      toast.error(`Vui lòng chọn nhân vật ${label === 'trái' ? 'Trái' : 'Phải'}`);
+      return;
+    }
+    const charSegments = segments.filter(s => s.characterName === targetCharName && s.audioUrl);
+    if (charSegments.length === 0) {
+      toast.error(`Không có đoạn thoại nào cho nhân vật ${targetCharName} đã được chuyển đổi.`);
+      return;
+    }
+
+    try {
+      toast.loading(`Đang chuẩn bị tải ${charSegments.length} đoạn của ${targetCharName}...`, { id: 'bulk-download' });
+      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+
+      for (let i = 0; i < charSegments.length; i++) {
+        const seg = charSegments[i];
+        // Find the global index for naming (1-based)
+        const globalIdx = segments.findIndex(s => s.id === seg.id) + 1;
+        
+        const audioRes = await fetch(seg.audioUrl!);
+        const arrayBuffer = await audioRes.arrayBuffer();
+        const buffer = await audioContext.decodeAudioData(arrayBuffer);
+        
+        const duration = buffer.duration;
+        const baseName = label;
+
+        const downloadFile = (blob: Blob, filename: string) => {
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = filename;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          setTimeout(() => URL.revokeObjectURL(url), 100);
+        };
+
+        if (duration > 180) { // 3 minutes = 180 seconds
+          const halfLength = Math.floor(buffer.length / 2);
+          
+          // Part 1
+          const part1Buffer = audioContext.createBuffer(buffer.numberOfChannels, halfLength, buffer.sampleRate);
+          for (let channel = 0; channel < buffer.numberOfChannels; channel++) {
+            part1Buffer.copyToChannel(buffer.getChannelData(channel).slice(0, halfLength), channel);
+          }
+          downloadFile(bufferToWav(part1Buffer), `${baseName}_${globalIdx}_part1.wav`);
+
+          // Part 2
+          const part2Buffer = audioContext.createBuffer(buffer.numberOfChannels, buffer.length - halfLength, buffer.sampleRate);
+          for (let channel = 0; channel < buffer.numberOfChannels; channel++) {
+            part2Buffer.copyToChannel(buffer.getChannelData(channel).slice(halfLength), channel);
+          }
+          downloadFile(bufferToWav(part2Buffer), `${baseName}_${globalIdx}_part2.wav`);
+        } else {
+          downloadFile(bufferToWav(buffer), `${baseName}_${globalIdx}.wav`);
+        }
+
+        // Small delay to avoid browser blocking multiple downloads
+        await new Promise(resolve => setTimeout(resolve, 600));
+      }
+
+      toast.success(`Đã tải xong các đoạn của ${targetCharName}!`, { id: 'bulk-download' });
+    } catch (error) {
+      console.error("Error downloading character segments:", error);
+      toast.error("Lỗi khi tải các đoạn nhân vật.", { id: 'bulk-download' });
+    }
+  };
+
+  const downloadSequentialSegments = async () => {
+    if (segments.length === 0) return;
+    const finalSegments = segments.filter(s => s.audioUrl);
+    if (finalSegments.length === 0) {
+      toast.error("Vui lòng chuyển đổi văn bản trước.");
+      return;
+    }
+
+    try {
+      toast.loading("Đang chuẩn bị tải xuống hàng loạt...", { id: 'bulk-download' });
+      const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+
+      for (const seg of finalSegments) {
+        const globalIdx = segments.findIndex(s => s.id === seg.id) + 1;
+        const audioRes = await fetch(seg.audioUrl!);
+        const arrayBuffer = await audioRes.arrayBuffer();
+        const buffer = await audioContext.decodeAudioData(arrayBuffer);
+        
+        const duration = buffer.duration;
+        let baseName = "voice";
+        if (seg.characterName === leftCharacter) baseName = "trái";
+        else if (seg.characterName === rightCharacter) baseName = "phải";
+        else if (seg.characterName) baseName = seg.characterName;
+
+        const downloadFile = (blob: Blob, filename: string) => {
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = filename;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+          setTimeout(() => URL.revokeObjectURL(url), 100);
+        };
+
+        if (duration > 180) { // 3 minutes = 180 seconds
+          const halfLength = Math.floor(buffer.length / 2);
+          
+          // Part 1
+          const part1Buffer = audioContext.createBuffer(buffer.numberOfChannels, halfLength, buffer.sampleRate);
+          for (let channel = 0; channel < buffer.numberOfChannels; channel++) {
+            part1Buffer.copyToChannel(buffer.getChannelData(channel).slice(0, halfLength), channel);
+          }
+          downloadFile(bufferToWav(part1Buffer), `${baseName}_${globalIdx}_part1.wav`);
+
+          // Part 2
+          const part2Buffer = audioContext.createBuffer(buffer.numberOfChannels, buffer.length - halfLength, buffer.sampleRate);
+          for (let channel = 0; channel < buffer.numberOfChannels; channel++) {
+            part2Buffer.copyToChannel(buffer.getChannelData(channel).slice(halfLength), channel);
+          }
+          downloadFile(bufferToWav(part2Buffer), `${baseName}_${globalIdx}_part2.wav`);
+        } else {
+          downloadFile(bufferToWav(buffer), `${baseName}_${globalIdx}.wav`);
+        }
+
+        // Small delay to avoid browser blocking multiple downloads
+        await new Promise(resolve => setTimeout(resolve, 600));
+      }
+
+      toast.success("Đã hoàn tất tải xuống hàng loạt!", { id: 'bulk-download' });
+    } catch (error) {
+      console.error("Error in sequential download:", error);
+      toast.error("Lỗi khi tải xuống hàng loạt.", { id: 'bulk-download' });
+    }
+  };
+
   const downloadCharacterAudio = async (targetCharName: string | null, compact: boolean = false) => {
     if (segments.length === 0) return;
     
@@ -1172,15 +1362,17 @@ export default function App() {
             
             // Process batch in parallel
             const batchPromises = batch.map(async (seg) => {
+              const voiceIdToUse = voices.some(v => v.id === seg.voice) ? seg.voice : selectedVoice;
+              
               const payload = {
                 mode: "paragraph",
                 parts: [{
                   startTime: 0,
                   endTime: 10,
                   text: seg.text.length < 100 ? seg.text.padEnd(99, ' ') + '.' : seg.text,
-                  voiceId: seg.voice || selectedVoice
+                  voiceId: voiceIdToUse
                 }],
-                voiceId: seg.voice || selectedVoice,
+                voiceId: voiceIdToUse,
                 previewText: seg.text.slice(0, 50),
                 metadata: {
                   speed: speed,
@@ -1218,7 +1410,7 @@ export default function App() {
                 }
                 return result.audioUrl;
               } else {
-                const errorMsg = data.msg || data.message || data.error || data.error_message || data.error_msg || data.error_description || (typeof data === 'object' ? JSON.stringify(data) : 'Có lỗi xảy ra khi gọi API.');
+                const errorMsg = data.msg || data.message || (data.errors && Array.isArray(data.errors) ? data.errors.join(', ') : null) || data.error || data.error_message || data.error_msg || data.error_description || (typeof data === 'object' ? JSON.stringify(data) : 'Có lỗi xảy ra khi gọi API.');
                 throw new Error(errorMsg);
               }
             });
@@ -1381,7 +1573,7 @@ export default function App() {
           fetchApiInfo(apiKey);
           toast.success("Hoàn thành!", { id: 'gen-status' });
         } else {
-          const errorMsg = data.msg || data.message || data.error || data.error_message || data.error_msg || data.error_description || (typeof data === 'object' ? JSON.stringify(data) : 'Có lỗi xảy ra khi gọi API.');
+          const errorMsg = data.msg || data.message || (data.errors && Array.isArray(data.errors) ? data.errors.join(', ') : null) || data.error || data.error_message || data.error_msg || data.error_description || (typeof data === 'object' ? JSON.stringify(data) : 'Có lỗi xảy ra khi gọi API.');
           throw new Error(errorMsg);
         }
       }
@@ -2097,21 +2289,84 @@ export default function App() {
 
                 <div className="flex justify-between items-center mb-2">
                   <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Danh sách đoạn hội thoại</h3>
-                  <button 
-                    onClick={() => {
-                      if (playingSegmentId) {
-                        shouldStopPlayback.current = true;
-                        if (currentAudioRef.current) currentAudioRef.current.pause();
-                        setPlayingSegmentId(null);
-                      } else {
-                        playAllSegments(0);
-                      }
-                    }}
-                    className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-[10px] font-bold transition-all border ${playingSegmentId ? 'bg-red-600/20 border-red-500/30 text-red-400 hover:bg-red-600/30' : 'bg-blue-600/20 border-blue-500/30 text-blue-400 hover:bg-blue-600/30'}`}
-                  >
-                    {playingSegmentId ? <X size={12} /> : <Play size={12} fill="currentColor" />}
-                    <span>{playingSegmentId ? 'Dừng phát' : 'Nghe toàn bộ'}</span>
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button 
+                      onClick={() => {
+                        if (playingSegmentId) {
+                          shouldStopPlayback.current = true;
+                          if (currentAudioRef.current) currentAudioRef.current.pause();
+                          setPlayingSegmentId(null);
+                        } else {
+                          playAllSegments(0);
+                        }
+                      }}
+                      className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-[10px] font-bold transition-all border ${playingSegmentId ? 'bg-red-600/20 border-red-500/30 text-red-400 hover:bg-red-600/30' : 'bg-blue-600/20 border-blue-500/30 text-blue-400 hover:bg-blue-600/30'}`}
+                    >
+                      {playingSegmentId ? <X size={12} /> : <Play size={12} fill="currentColor" />}
+                      <span>{playingSegmentId ? 'Dừng phát' : 'Nghe toàn bộ'}</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Sequential Download Config - Visible after splitting */}
+                <div className="bg-[#1a1c2e]/50 p-4 rounded-xl border border-slate-800 mb-4 space-y-3">
+                  <div className="flex items-center gap-2 text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">
+                    <Download size={12} className="text-blue-400" />
+                    <span>Cấu hình tải từng đoạn (Trái/Phải)</span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-1">
+                      <label className="text-[9px] text-slate-500 font-bold uppercase">Nhân vật Trái</label>
+                      <select 
+                        value={leftCharacter}
+                        onChange={(e) => setLeftCharacter(e.target.value)}
+                        className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-[10px] text-slate-300 focus:ring-1 focus:ring-blue-500 outline-none"
+                      >
+                        <option value="">Chọn nhân vật</option>
+                        {Array.from(new Set(segments.map(s => s.characterName).filter(Boolean))).map(name => (
+                          <option key={name as string} value={name as string}>{name}</option>
+                        ))}
+                      </select>
+                      <button 
+                        disabled={!leftCharacter || !segments.some(s => s.characterName === leftCharacter && s.audioUrl)}
+                        onClick={() => downloadCharacterSegmentsIndividually(leftCharacter, 'trái')}
+                        className="w-full mt-1 py-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed text-slate-300 text-[9px] font-bold rounded-lg border border-slate-700 transition-all"
+                      >
+                        Tải từng đoạn Trái
+                      </button>
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[9px] text-slate-500 font-bold uppercase">Nhân vật Phải</label>
+                      <select 
+                        value={rightCharacter}
+                        onChange={(e) => setRightCharacter(e.target.value)}
+                        className="w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-[10px] text-slate-300 focus:ring-1 focus:ring-blue-500 outline-none"
+                      >
+                        <option value="">Chọn nhân vật</option>
+                        {Array.from(new Set(segments.map(s => s.characterName).filter(Boolean))).map(name => (
+                          <option key={name as string} value={name as string}>{name}</option>
+                        ))}
+                      </select>
+                      <button 
+                        disabled={!rightCharacter || !segments.some(s => s.characterName === rightCharacter && s.audioUrl)}
+                        onClick={() => downloadCharacterSegmentsIndividually(rightCharacter, 'phải')}
+                        className="w-full mt-1 py-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed text-slate-300 text-[9px] font-bold rounded-lg border border-slate-700 transition-all"
+                      >
+                        Tải từng đoạn Phải
+                      </button>
+                    </div>
+                  </div>
+                  <div className="pt-2 border-t border-slate-800">
+                    <button 
+                      disabled={!segments.some(s => s.audioUrl)}
+                      onClick={downloadSequentialSegments}
+                      className="w-full flex items-center justify-center gap-2 py-2 bg-blue-600/20 hover:bg-blue-600/30 disabled:opacity-50 disabled:cursor-not-allowed text-blue-400 text-[10px] font-bold rounded-lg border border-blue-500/30 transition-all"
+                    >
+                      <Download size={12} />
+                      <span>Tải tất cả (Trái + Phải + Khác)</span>
+                    </button>
+                  </div>
+                  <p className="text-[8px] text-slate-600 italic text-center">* Tự động chia đôi nếu đoạn dài {">"} 3 phút</p>
                 </div>
                 {segments.map((seg, idx) => (
                   <div key={seg.id} className={`bg-[#0f111a] p-4 rounded-xl border transition-all space-y-3 group relative ${playingSegmentId === seg.id ? 'border-blue-500 shadow-[0_0_15px_rgba(59,130,246,0.2)]' : 'border-slate-700/50'}`}>
@@ -2135,21 +2390,30 @@ export default function App() {
                       </div>
                       <div className="flex items-center gap-2">
                         {seg.audioUrl && (
-                          <button 
-                            onClick={() => {
-                              if (playingSegmentId === seg.id) {
-                                shouldStopPlayback.current = true;
-                                if (currentAudioRef.current) currentAudioRef.current.pause();
-                                setPlayingSegmentId(null);
-                              } else {
-                                playAllSegments(idx);
-                              }
-                            }}
-                            className={`p-1.5 rounded-lg transition-all ${playingSegmentId === seg.id ? 'bg-blue-600 text-white' : 'bg-slate-800 hover:bg-blue-600 text-slate-400 hover:text-white'}`}
-                            title={playingSegmentId === seg.id ? "Dừng" : "Nghe từ đoạn này"}
-                          >
-                            {playingSegmentId === seg.id ? <X size={12} /> : <Play size={12} fill="currentColor" />}
-                          </button>
+                          <div className="flex items-center gap-1">
+                            <button 
+                              onClick={() => {
+                                if (playingSegmentId === seg.id) {
+                                  shouldStopPlayback.current = true;
+                                  if (currentAudioRef.current) currentAudioRef.current.pause();
+                                  setPlayingSegmentId(null);
+                                } else {
+                                  playAllSegments(idx);
+                                }
+                              }}
+                              className={`p-1.5 rounded-lg transition-all ${playingSegmentId === seg.id ? 'bg-blue-600 text-white' : 'bg-slate-800 hover:bg-blue-600 text-slate-400 hover:text-white'}`}
+                              title={playingSegmentId === seg.id ? "Dừng" : "Nghe từ đoạn này"}
+                            >
+                              {playingSegmentId === seg.id ? <X size={12} /> : <Play size={12} fill="currentColor" />}
+                            </button>
+                            <button 
+                              onClick={() => downloadSingleSegment(seg.id)}
+                              className="p-1.5 bg-slate-800 hover:bg-emerald-600 text-slate-400 hover:text-white rounded-lg transition-all"
+                              title="Tải đoạn này"
+                            >
+                              <Download size={12} />
+                            </button>
+                          </div>
                         )}
                         <button 
                           onClick={() => setSegments(segments.filter(s => s.id !== seg.id))}
