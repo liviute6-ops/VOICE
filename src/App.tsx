@@ -298,6 +298,9 @@ export default function App() {
   const [regPassword, setRegPassword] = useState('');
   const [isRegistering, setIsRegistering] = useState(false);
   
+  // Character to Voice Mapping
+  const [charVoiceMap, setCharVoiceMap] = useState<Record<string, string>>({});
+  
   // New state for sequential download naming
   const [leftCharacter, setLeftCharacter] = useState<string>('');
   const [rightCharacter, setRightCharacter] = useState<string>('');
@@ -544,56 +547,71 @@ export default function App() {
       }));
     } else if (splitType === 'prefix') {
       // Smart detection for dialogue
-      const lines = text.split('\n').filter(l => l.trim());
+      // We'll use a more advanced approach to handle multiple dialogues on the same line
+      const rawLines = text.split('\n').filter(l => l.trim());
       let currentId = 0;
+      let lastCharacterName = ""; // Track the last character to inherit names
       
-      lines.forEach(line => {
-        // Pattern 1: [Name]: Text
-        const bracketMatch = line.match(/^\[([^\]]+)\]:\s*(.*)/);
-        if (bracketMatch) {
-          const voiceName = bracketMatch[1].trim();
-          // Try to find a matching voice ID if it's already a voice ID
-          const matchedVoice = voices.find(v => v.name.toLowerCase() === voiceName.toLowerCase() || v.id === voiceName);
+      rawLines.forEach(line => {
+        // Find all occurrences of [Name]: or Name: patterns
+        // Pattern: (?:^|[\.\!\?]\s+)(?:\[([^\]]+)\]|([A-ZÀ-Ỹ][^:]{1,20}))\s*:
+        const pattern = /(?:^|[\.\!\?]\s+)(?:\[([^\]]+)\]|([A-ZÀ-Ỹ][^:]{1,20}))\s*:/g;
+        let match;
+        const matches: {name: string, start: number, end: number}[] = [];
+
+        while ((match = pattern.exec(line)) !== null) {
+          const name = (match[1] || match[2]).trim();
+          const words = name.split(/\s+/);
+          // Character names are usually short and don't contain sentence punctuation
+          if (words.length <= 5 && !name.includes(',') && !name.includes('.')) {
+            matches.push({ name, start: match.index, end: pattern.lastIndex });
+          }
+        }
+
+        if (matches.length === 0) {
+          // No character detected on this line, inherit from previous if available
+          const mappedVoiceId = lastCharacterName ? charVoiceMap[lastCharacterName] : "";
           newSegments.push({
             id: (currentId++).toString(),
-            voice: matchedVoice ? matchedVoice.id : voiceName,
-            characterName: voiceName,
-            text: bracketMatch[2].trim()
+            voice: mappedVoiceId || (lastCharacterName ? "" : selectedVoice),
+            characterName: lastCharacterName || undefined,
+            text: line.trim()
           });
-          return;
+        } else {
+          // If there's text BEFORE the first match, it belongs to the previous character
+          if (matches[0].start > 0) {
+            const leadingText = line.slice(0, matches[0].start).trim();
+            if (leadingText) {
+              const mappedVoiceId = lastCharacterName ? charVoiceMap[lastCharacterName] : "";
+              newSegments.push({
+                id: (currentId++).toString(),
+                voice: mappedVoiceId || (lastCharacterName ? "" : selectedVoice),
+                characterName: lastCharacterName || undefined,
+                text: leadingText
+              });
+            }
+          }
+
+          // Split the line based on detected character starts
+          for (let i = 0; i < matches.length; i++) {
+            const currentMatch = matches[i];
+            const nextMatch = matches[i + 1];
+            const segmentText = line.slice(currentMatch.end, nextMatch ? nextMatch.start : undefined).trim();
+            
+            if (segmentText) {
+              const voiceName = currentMatch.name;
+              lastCharacterName = voiceName; // Update the "sticky" character name
+              const mappedVoiceId = charVoiceMap[voiceName];
+              
+              newSegments.push({
+                id: (currentId++).toString(),
+                voice: mappedVoiceId || "", 
+                characterName: voiceName,
+                text: segmentText
+              });
+            }
+          }
         }
-        
-        // Pattern 2: Name: Text (Name should be short, like 1-3 words)
-        const colonMatch = line.match(/^([^:]{1,30}):\s*(.*)/);
-        if (colonMatch) {
-          const voiceName = colonMatch[1].trim();
-          const matchedVoice = voices.find(v => v.name.toLowerCase() === voiceName.toLowerCase() || v.id === voiceName);
-          newSegments.push({
-            id: (currentId++).toString(),
-            voice: matchedVoice ? matchedVoice.id : voiceName,
-            characterName: voiceName,
-            text: colonMatch[2].trim()
-          });
-          return;
-        }
-        
-        // Pattern 3: - Text
-        const dashMatch = line.match(/^- \s*(.*)/);
-        if (dashMatch) {
-          newSegments.push({
-            id: (currentId++).toString(),
-            voice: selectedVoice,
-            text: dashMatch[1].trim()
-          });
-          return;
-        }
-        
-        // Default
-        newSegments.push({
-          id: (currentId++).toString(),
-          voice: selectedVoice,
-          text: line.trim()
-        });
       });
     } else {
       newSegments = [{ id: '0', text: text, voice: selectedVoice }];
@@ -657,19 +675,24 @@ export default function App() {
         setTimeout(() => URL.revokeObjectURL(url), 100);
       };
 
-      if (duration > 180) {
-        const halfLength = Math.floor(buffer.length / 2);
-        const part1Buffer = audioContext.createBuffer(buffer.numberOfChannels, halfLength, buffer.sampleRate);
-        for (let channel = 0; channel < buffer.numberOfChannels; channel++) {
-          part1Buffer.copyToChannel(buffer.getChannelData(channel).slice(0, halfLength), channel);
+      const maxDuration = 180; // 3 minutes
+      if (duration > maxDuration) {
+        const numParts = Math.ceil(duration / maxDuration);
+        for (let p = 0; p < numParts; p++) {
+          const start = p * maxDuration;
+          const end = Math.min((p + 1) * maxDuration, duration);
+          const startSample = Math.floor(start * buffer.sampleRate);
+          const endSample = Math.floor(end * buffer.sampleRate);
+          const partLength = endSample - startSample;
+          
+          const partBuffer = audioContext.createBuffer(buffer.numberOfChannels, partLength, buffer.sampleRate);
+          for (let channel = 0; channel < buffer.numberOfChannels; channel++) {
+            partBuffer.copyToChannel(buffer.getChannelData(channel).slice(startSample, endSample), channel);
+          }
+          // Per user request: all parts of the same segment share the same index name
+          downloadFile(bufferToWav(partBuffer), `${baseName}_${globalIdx}.wav`);
+          if (p < numParts - 1) await new Promise(resolve => setTimeout(resolve, 400));
         }
-        downloadFile(bufferToWav(part1Buffer), `${baseName}_${globalIdx}_part1.wav`);
-
-        const part2Buffer = audioContext.createBuffer(buffer.numberOfChannels, buffer.length - halfLength, buffer.sampleRate);
-        for (let channel = 0; channel < buffer.numberOfChannels; channel++) {
-          part2Buffer.copyToChannel(buffer.getChannelData(channel).slice(halfLength), channel);
-        }
-        downloadFile(bufferToWav(part2Buffer), `${baseName}_${globalIdx}_part2.wav`);
       } else {
         downloadFile(bufferToWav(buffer), `${baseName}_${globalIdx}.wav`);
       }
@@ -717,22 +740,24 @@ export default function App() {
           setTimeout(() => URL.revokeObjectURL(url), 100);
         };
 
-        if (duration > 180) { // 3 minutes = 180 seconds
-          const halfLength = Math.floor(buffer.length / 2);
-          
-          // Part 1
-          const part1Buffer = audioContext.createBuffer(buffer.numberOfChannels, halfLength, buffer.sampleRate);
-          for (let channel = 0; channel < buffer.numberOfChannels; channel++) {
-            part1Buffer.copyToChannel(buffer.getChannelData(channel).slice(0, halfLength), channel);
+        const maxDuration = 180; // 3 minutes
+        if (duration > maxDuration) {
+          const numParts = Math.ceil(duration / maxDuration);
+          for (let p = 0; p < numParts; p++) {
+            const start = p * maxDuration;
+            const end = Math.min((p + 1) * maxDuration, duration);
+            const startSample = Math.floor(start * buffer.sampleRate);
+            const endSample = Math.floor(end * buffer.sampleRate);
+            const partLength = endSample - startSample;
+            
+            const partBuffer = audioContext.createBuffer(buffer.numberOfChannels, partLength, buffer.sampleRate);
+            for (let channel = 0; channel < buffer.numberOfChannels; channel++) {
+              partBuffer.copyToChannel(buffer.getChannelData(channel).slice(startSample, endSample), channel);
+            }
+            // Per user request: all parts of the same segment share the same index name
+            downloadFile(bufferToWav(partBuffer), `${baseName}_${globalIdx}.wav`);
+            if (p < numParts - 1) await new Promise(resolve => setTimeout(resolve, 400));
           }
-          downloadFile(bufferToWav(part1Buffer), `${baseName}_${globalIdx}_part1.wav`);
-
-          // Part 2
-          const part2Buffer = audioContext.createBuffer(buffer.numberOfChannels, buffer.length - halfLength, buffer.sampleRate);
-          for (let channel = 0; channel < buffer.numberOfChannels; channel++) {
-            part2Buffer.copyToChannel(buffer.getChannelData(channel).slice(halfLength), channel);
-          }
-          downloadFile(bufferToWav(part2Buffer), `${baseName}_${globalIdx}_part2.wav`);
         } else {
           downloadFile(bufferToWav(buffer), `${baseName}_${globalIdx}.wav`);
         }
@@ -783,22 +808,24 @@ export default function App() {
           setTimeout(() => URL.revokeObjectURL(url), 100);
         };
 
-        if (duration > 180) { // 3 minutes = 180 seconds
-          const halfLength = Math.floor(buffer.length / 2);
-          
-          // Part 1
-          const part1Buffer = audioContext.createBuffer(buffer.numberOfChannels, halfLength, buffer.sampleRate);
-          for (let channel = 0; channel < buffer.numberOfChannels; channel++) {
-            part1Buffer.copyToChannel(buffer.getChannelData(channel).slice(0, halfLength), channel);
+        const maxDuration = 180; // 3 minutes
+        if (duration > maxDuration) {
+          const numParts = Math.ceil(duration / maxDuration);
+          for (let p = 0; p < numParts; p++) {
+            const start = p * maxDuration;
+            const end = Math.min((p + 1) * maxDuration, duration);
+            const startSample = Math.floor(start * buffer.sampleRate);
+            const endSample = Math.floor(end * buffer.sampleRate);
+            const partLength = endSample - startSample;
+            
+            const partBuffer = audioContext.createBuffer(buffer.numberOfChannels, partLength, buffer.sampleRate);
+            for (let channel = 0; channel < buffer.numberOfChannels; channel++) {
+              partBuffer.copyToChannel(buffer.getChannelData(channel).slice(startSample, endSample), channel);
+            }
+            // Per user request: all parts of the same segment share the same index name
+            downloadFile(bufferToWav(partBuffer), `${baseName}_${globalIdx}.wav`);
+            if (p < numParts - 1) await new Promise(resolve => setTimeout(resolve, 400));
           }
-          downloadFile(bufferToWav(part1Buffer), `${baseName}_${globalIdx}_part1.wav`);
-
-          // Part 2
-          const part2Buffer = audioContext.createBuffer(buffer.numberOfChannels, buffer.length - halfLength, buffer.sampleRate);
-          for (let channel = 0; channel < buffer.numberOfChannels; channel++) {
-            part2Buffer.copyToChannel(buffer.getChannelData(channel).slice(halfLength), channel);
-          }
-          downloadFile(bufferToWav(part2Buffer), `${baseName}_${globalIdx}_part2.wav`);
         } else {
           downloadFile(bufferToWav(buffer), `${baseName}_${globalIdx}.wav`);
         }
@@ -1342,6 +1369,19 @@ export default function App() {
     setError(null);
     setAudioUrl(null);
     setSrtUrl(null);
+    
+    // Check if all segments with characters have valid voices
+    const unassignedSegments = segments.filter(s => s.characterName && !voices.some(v => v.id === s.voice));
+    if (unassignedSegments.length > 0) {
+      const charNames = Array.from(new Set(unassignedSegments.map(s => s.characterName)));
+      const confirmMsg = `Các nhân vật sau chưa được gán giọng: ${charNames.join(', ')}. Hệ thống sẽ sử dụng giọng mặc định ("${voices.find(v => v.id === selectedVoice)?.name}") cho các nhân vật này. Bạn có muốn tiếp tục không?`;
+      
+      // Since we can't use window.confirm in iframe easily, we'll just show a toast warning and proceed, 
+      // but we'll make it very clear in the UI (which I already added with the amber hint).
+      toast.error(`Vui lòng gán giọng cho nhân vật: ${charNames.join(', ')}`, { id: 'gen-status' });
+      setIsGenerating(false);
+      return;
+    }
     
     try {
       const validSegments = segments.filter(s => s.text && s.text.trim());
@@ -2436,6 +2476,14 @@ export default function App() {
                       }}
                       className="w-full bg-transparent border-none focus:ring-0 text-slate-200 text-sm leading-relaxed resize-none h-16"
                     />
+                    
+                    {/* Character Mapping Hint */}
+                    {seg.characterName && !voices.some(v => v.id === seg.voice) && (
+                      <div className="mt-1 flex items-center gap-2 px-2 py-1 bg-amber-500/10 border border-amber-500/20 rounded text-[9px] text-amber-400 font-medium animate-pulse">
+                        <AlertCircle size={10} />
+                        <span>Nhân vật "{seg.characterName}" chưa được gán giọng. Hãy nhấn "Chọn giọng" để gán cho tất cả đoạn của nhân vật này.</span>
+                      </div>
+                    )}
                   </div>
                 ))}
                 <button 
@@ -2802,6 +2850,38 @@ export default function App() {
                 </button>
               </div>
 
+              {/* Character Mapping Section */}
+              {Object.keys(charVoiceMap).length > 0 && (
+                <div className="space-y-3 p-3 bg-slate-800/50 rounded-xl border border-slate-700/50">
+                  <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider flex items-center justify-between">
+                    <span>Gán giọng nhân vật</span>
+                    <button onClick={() => setCharVoiceMap({})} className="text-red-400 hover:text-red-300">Xóa hết</button>
+                  </div>
+                  <div className="space-y-2 max-h-32 overflow-y-auto custom-scrollbar pr-1">
+                    {Object.entries(charVoiceMap).map(([char, voiceId]) => (
+                      <div key={char} className="flex items-center justify-between text-xs">
+                        <span className="text-slate-300 truncate max-w-[80px]">{char}</span>
+                        <div className="flex items-center gap-1">
+                          <span className="text-blue-400 truncate max-w-[80px]">
+                            {voices.find(v => v.id === voiceId)?.name || '...'}
+                          </span>
+                          <button 
+                            onClick={() => {
+                              const newMap = { ...charVoiceMap };
+                              delete newMap[char];
+                              setCharVoiceMap(newMap);
+                            }}
+                            className="text-slate-500 hover:text-slate-300"
+                          >
+                            <X size={10} />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               <div className="space-y-6">
                 <div className="space-y-3">
                   <div className="flex justify-between text-xs font-bold text-slate-400">
@@ -3092,8 +3172,11 @@ export default function App() {
                         if (targetSegment) {
                           const charName = targetSegment.characterName;
                           if (charName) {
+                            // Update map for future splits
+                            setCharVoiceMap(prev => ({ ...prev, [charName]: voice.id }));
                             // Update all segments with the same character name
                             setSegments(segments.map(s => s.characterName === charName ? { ...s, voice: voice.id, audioUrl: undefined } : s));
+                            toast.success(`Đã áp dụng giọng "${voice.name}" cho tất cả đoạn của "${charName}"`);
                           } else {
                             // Update only this segment
                             setSegments(segments.map(s => s.id === activeSegmentId ? { ...s, voice: voice.id, audioUrl: undefined } : s));
